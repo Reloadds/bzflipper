@@ -41,11 +41,11 @@ public class BzFlipper implements ClientModInitializer {
 
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.bzflipper.toggle", InputUtil.Type.KEYSYM,
-                GLFW.GLFW_KEY_BACKSLASH, "key.categories.bzflipper"));
+                GLFW.GLFW_KEY_BACKSLASH, KeyBinding.Category.MISC));
 
         panicKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.bzflipper.panic", InputUtil.Type.KEYSYM,
-                GLFW.GLFW_KEY_END, "key.categories.bzflipper"));
+                GLFW.GLFW_KEY_END, KeyBinding.Category.MISC));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
         HudRenderCallback.EVENT.register((ctx, tickCounter) -> overlay.render(ctx));

@@ -60,7 +60,7 @@ public final class GuiHelper {
         if (stack == null || stack.isEmpty()) return out;
         LoreComponent lc = stack.get(DataComponentTypes.LORE);
         if (lc == null) return out;
-        for (Text line : lc.lines()) {
+        for (Text line : lc.styledLines()) {
             out.add(line.getString().toLowerCase(Locale.ROOT));
         }
         return out;
