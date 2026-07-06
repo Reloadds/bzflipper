@@ -112,6 +112,13 @@ public class FlipConfig {
     /** If true, the macro only navigates + reads prices and never places orders. */
     public boolean dryRun = true;
 
+    // ---- Hands-free startup ----
+    /** On Hypixel login: auto /skyblock → wait → /is → wait → start the flipper. */
+    public boolean autoStart = true;
+
+    /** Seconds to wait after reaching SkyBlock, and again after the island world loads. */
+    public int autoDelaySeconds = 8;
+
     /** Items the macro may flip. */
     public List<FlipTarget> targets = new ArrayList<>();
 
