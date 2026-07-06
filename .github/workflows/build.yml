@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Resolve real Fabric versions for the target Minecraft
+        run: |
+          MC=$(grep '^minecraft_version=' gradle.properties | cut -d= -f2)
+          echo "Target Minecraft: $MC"
+
+          YARN=$(curl -s "https://meta.fabricmc.net/v2/versions/yarn/$MC" | jq -r '.[0].version // empty')
+          LOADER=$(curl -s "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[]|select(.stable==true)][0].version // empty')
+          FAPI=$(curl -s "https://api.modrinth.com/v2/project/fabric-api/version?game_versions=%5B%22$MC%22%5D&loaders=%5B%22fabric%22%5D" | jq -r '.[0].version_number // empty')
+
+          echo "Resolved -> yarn=$YARN  loader=$LOADER  fabric-api=$FAPI"
+
+          if [ -z "$YARN" ]; then
+            echo "::error::No Yarn mappings exist for Minecraft $MC. That version may not be published/supported. Edit minecraft_version in gradle.properties to a supported 1.21.x release."
+            exit 1
+          fi
+          [ -n "$LOADER" ] && sed -i "s|^loader_version=.*|loader_version=$LOADER|" gradle.properties
+          sed -i "s|^yarn_mappings=.*|yarn_mappings=$YARN|" gradle.properties
+          if [ -n "$FAPI" ]; then
+            sed -i "s|^fabric_version=.*|fabric_version=$FAPI|" gradle.properties
+          else
+            echo "::warning::No Fabric API build found for $MC; using the value already in gradle.properties."
+          fi
+
+          echo "----- effective gradle.properties -----"
+          cat gradle.properties
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10'
+
+      - name: Build
+        run: gradle build --stacktrace --warning-mode all
+
+      - name: Upload mod jar
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzflipper-jar
+          path: build/libs/*.jar
+          if-no-files-found: error
