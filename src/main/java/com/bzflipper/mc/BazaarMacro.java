@@ -387,15 +387,26 @@ public class BazaarMacro {
         return "no new pick";
     }
 
+    /** Coins to commit to the next order: spendable purse split evenly across the
+     *  remaining open slots, capped so no single item hogs the book. */
+    private double perOrderBudget() {
+        double spendable = purse - config.coinReserve;
+        if (Double.isNaN(spendable) || spendable <= 0) return 0;
+        int freeSlots = Math.max(1, config.maxOpenOrders - orders.size());
+        double even = spendable / freeSlots;
+        double cap = spendable * Math.max(0.05, Math.min(1.0, config.orderBudgetFraction));
+        return Math.min(even, cap);
+    }
+
     /** Best-ranked candidate we don't already hold, hold pending, or see in the grid. */
     private String pickNextItem(List<ParsedOrder> grid) {
-        double spendablePerOrder = (purse - config.coinReserve) * config.orderBudgetFraction;
+        double spendablePerOrder = perOrderBudget();
         Set<String> held = new HashSet<>(orders.keySet());
         for (ParsedOrder o : grid) held.add(o.key());
         for (String s : pendingSells) held.add(s.toLowerCase(Locale.ROOT));
 
         if (config.useApiFlips) {
-            if (Double.isNaN(purse) || spendablePerOrder <= 0) return null;
+            if (spendablePerOrder <= 0) return null;
             long now = System.currentTimeMillis();
             for (FlipCandidate c : api.getCandidates()) {
                 String key = c.displayName.toLowerCase(Locale.ROOT);
@@ -458,7 +469,7 @@ public class BazaarMacro {
     // ---- buy ----
 
     private void pBuyAmount(MinecraftClient mc) {
-        double spendable = (purse - config.coinReserve) * config.orderBudgetFraction;
+        double spendable = perOrderBudget();
         int byPurse = PriceMath.affordableUnits(spendable, ourBuyPrice, config.maxUnitsPerOrder);
         if (byPurse < 1) { log("insufficient purse for " + activeItem + " — skipping"); phase = Phase.PLAN; return; }
         int byVolume = (activeHourlyVol == Double.MAX_VALUE)
@@ -510,17 +521,25 @@ public class BazaarMacro {
         if (GuiHelper.clickByNameAndLore(mc, BazaarStrings.BTN_SELL_OFFER, BazaarStrings.LORE_SUBMIT)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_SELL)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CONFIRM)) {
-            String key = activeItem.toLowerCase(Locale.ROOT);
-            OrderInfo oi = orders.computeIfAbsent(key, k -> new OrderInfo());
-            oi.sellPrice = ourSellPrice;
-            if (oi.amount <= 0) oi.amount = activeAmount;
-            ordersPlaced++;
-            pendingSells.removeFirstOccurrence(activeItem);
-            pendingSellAmounts.remove(key);
-            log(String.format(Locale.ROOT, "§6sell§r %s @ %.1f", activeItem, ourSellPrice));
-            activeItem = null;
-            phase = Phase.PLAN;
+            recordSell();
+        } else if (atManage(mc) || atProduct(mc)) {
+            // No confirm screen — the offer was placed directly. Record and move on.
+            recordSell();
         }
+    }
+
+    private void recordSell() {
+        if (activeItem == null) { phase = Phase.PLAN; return; }
+        String key = activeItem.toLowerCase(Locale.ROOT);
+        OrderInfo oi = orders.computeIfAbsent(key, k -> new OrderInfo());
+        oi.sellPrice = ourSellPrice;
+        if (oi.amount <= 0) oi.amount = activeAmount;
+        ordersPlaced++;
+        pendingSells.removeFirstOccurrence(activeItem);
+        pendingSellAmounts.remove(key);
+        log(String.format(Locale.ROOT, "§6sell§r %s @ %.1f", activeItem, ourSellPrice));
+        activeItem = null;
+        phase = Phase.PLAN;
     }
 
     // ---- cancel/relist (order options screen is open at this point) ----

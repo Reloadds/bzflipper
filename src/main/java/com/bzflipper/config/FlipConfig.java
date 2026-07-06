@@ -45,8 +45,9 @@ public class FlipConfig {
     /** Never spend the purse below this many coins. Raise it to keep a buffer. */
     public double coinReserve = 0;
 
-    /** Fraction of spendable purse (purse - reserve) to commit to a single order. */
-    public double orderBudgetFraction = 0.20;
+    /** Safety cap: no single order may exceed this fraction of spendable purse.
+     *  Capital is otherwise split evenly across the open order slots. */
+    public double orderBudgetFraction = 0.50;
 
     /** Hard cap on units per order (Bazaar's own limit is 71,680). */
     public int maxUnitsPerOrder = 71_680;
