@@ -24,8 +24,12 @@ jobs:
           YARN=$(curl -s "https://meta.fabricmc.net/v2/versions/yarn/$MC" | jq -r '.[0].version // empty')
           LOADER=$(curl -s "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[]|select(.stable==true)][0].version // empty')
           FAPI=$(curl -s "https://api.modrinth.com/v2/project/fabric-api/version?game_versions=%5B%22$MC%22%5D&loaders=%5B%22fabric%22%5D" | jq -r '.[0].version_number // empty')
+          # Newest Loom (needed so it understands the latest Yarn "unpick" format).
+          META=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-loom/maven-metadata.xml)
+          LOOM=$(echo "$META" | grep -oP '(?<=<latest>)[^<]+' | head -1)
+          [ -z "$LOOM" ] && LOOM=$(echo "$META" | grep -oP '(?<=<release>)[^<]+' | head -1)
 
-          echo "Resolved -> yarn=$YARN  loader=$LOADER  fabric-api=$FAPI"
+          echo "Resolved -> yarn=$YARN  loader=$LOADER  fabric-api=$FAPI  loom=$LOOM"
 
           if [ -z "$YARN" ]; then
             echo "::error::No Yarn mappings exist for Minecraft $MC. That version may not be published/supported. Edit minecraft_version in gradle.properties to a supported 1.21.x release."
@@ -38,9 +42,12 @@ jobs:
           else
             echo "::warning::No Fabric API build found for $MC; using the value already in gradle.properties."
           fi
+          if [ -n "$LOOM" ]; then
+            sed -i -E "s/(id 'fabric-loom' version ')[^']*(')/\1$LOOM\2/" build.gradle
+          fi
 
-          echo "----- effective gradle.properties -----"
-          cat gradle.properties
+          echo "----- effective gradle.properties -----"; cat gradle.properties
+          echo "----- loom line -----"; grep fabric-loom build.gradle
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
