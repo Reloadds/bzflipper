@@ -469,7 +469,10 @@ public class BazaarMacro {
         }
 
         // 5) Open a new buy order with the best-ranked flip we don't hold.
-        if (orders.size() < config.maxOpenOrders && buyCooldown <= 0 && slotFree && dailyOk) {
+        //    Cap concurrent flips at half the order limit (each item = buy+sell),
+        //    so it fills all your slots and scales with the Bazaar Flipper perk.
+        int flipCap = Math.min(config.maxOpenOrders, Math.max(1, orderLimit / 2));
+        if (orders.size() < flipCap && buyCooldown <= 0 && slotFree && dailyOk) {
             String pick = pickNextItem(grid);
             if (pick != null) {
                 if (config.dryRun) {
@@ -646,11 +649,10 @@ public class BazaarMacro {
                 if (held.contains(key)) continue;
                 if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // relist-war item
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
-                // Skip items too thin to use a slot's budget (avoids tiny orders):
-                // how much value can the item's volume absorb per order?
+                // Skip genuinely thin items (absolute floor, not purse-relative, so
+                // a bigger purse never reduces how many items qualify).
                 double volValue = (c.minWeeklyVolume() / 168.0) * config.orderVolumeFraction * c.ourBuyPrice();
-                if (config.minOrderValueFraction > 0
-                        && volValue < config.minOrderValueFraction * spendablePerOrder) continue;
+                if (config.minOrderValue > 0 && volValue < config.minOrderValue) continue;
                 activeHourlyVol = c.minWeeklyVolume() / 168.0;
                 activeBypassInv = ItemNames.bypassesInventory(c.tag);
                 activeStackSize = ItemNames.stackSize(c.tag);

@@ -30,8 +30,9 @@ public class FlipConfig {
     /** Bazaar sell tax fraction used in margin math (0.0125 = 1.25%). */
     public double taxFraction = 0.0125;
 
-    /** How many concurrent BUY orders to keep working at once. */
-    public int maxOpenOrders = 6;
+    /** How many different items to flip at once. Each uses up to 2 slots (buy +
+     *  sell), so it's auto-capped at half your order limit (7 at base, 14 w/ perk). */
+    public int maxOpenOrders = 7;
 
     /** Total order-slot cap (buys + sells). Base 14; Bazaar Flipper perk raises to
      *  21/28. Auto-learned from the "maximum of N Bazaar orders" message. */
@@ -74,11 +75,11 @@ public class FlipConfig {
     public double orderVolumeFraction = 0.5;
 
     /**
-     * Skip items too illiquid to use a slot: an item's volume must be able to
-     * absorb at least this fraction of the per-slot budget, or it's not worth an
-     * order. Prevents tiny (~800k) orders on thin items. 0 = disable.
+     * Skip items whose volume can't absorb at least this many coins per order —
+     * an ABSOLUTE floor, so a bigger purse never reduces how many items qualify.
+     * Filters out genuinely thin items without choking deployment. 0 = disable.
      */
-    public double minOrderValueFraction = 0.35;
+    public double minOrderValue = 500_000;
 
     // ---- Auto flip sourcing (Hypixel Bazaar API) ----
     /** If true, pick the best flips live from the API instead of the fixed targets list. */
