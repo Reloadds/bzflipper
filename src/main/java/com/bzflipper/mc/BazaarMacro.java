@@ -52,8 +52,9 @@ public class BazaarMacro {
     private static final double EPS = PriceMath.TICK / 2;
     /** Don't prune an order from memory until it's had time to appear in the grid. */
     private static final long PRUNE_AGE_MS = 90_000;
-    /** Hypixel allows 14 concurrent bazaar orders per player. */
-    private static final int BAZAAR_ORDER_CAP = 14;
+
+    private int orderLimit;                 // total slots (learned from chat)
+    private long dailyLimitUntil = 0;       // pause new orders until this time
 
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
@@ -138,7 +139,28 @@ public class BazaarMacro {
         this.config = config;
         this.api = api;
         this.tracker = tracker;
+        this.orderLimit = Math.max(1, config.maxBazaarOrders);
         loadState();
+    }
+
+    /** Parse Hypixel Bazaar limit messages from chat (authoritative). */
+    public void onChatMessage(String raw) {
+        String m = raw.toLowerCase(Locale.ROOT);
+        if (m.contains("maximum of") && m.contains("bazaar order")) {
+            java.util.regex.Matcher mt =
+                    java.util.regex.Pattern.compile("maximum of (\\d+)").matcher(m);
+            if (mt.find()) {
+                orderLimit = Integer.parseInt(mt.group(1));
+                config.maxBazaarOrders = orderLimit;   // remember the real cap
+            }
+            buyCooldown = Math.max(buyCooldown, 120);   // back off creating for a bit
+            note("§ebazaar order slots full (" + orderLimit + ") — waiting for fills");
+        } else if (m.contains("daily limit") && m.contains("bazaar")) {
+            dailyLimitUntil = System.currentTimeMillis()
+                    + config.dailyLimitCooldownMinutes * 60_000L;
+            note("§chit daily Bazaar coin limit§r — pausing new orders "
+                    + config.dailyLimitCooldownMinutes + "m; exiting via instasell");
+        }
     }
 
     // ---- state persistence ----
@@ -298,6 +320,9 @@ public class BazaarMacro {
         adoptAndPrune(grid);
         sweepLeftovers(mc, grid);
 
+        boolean slotFree = grid.size() < orderLimit;                       // 14/21/28
+        boolean dailyOk = System.currentTimeMillis() >= dailyLimitUntil;   // daily coin limit
+
         // 1) Claim goods/coins the moment they're claimable — Hypixel marks an
         //    order "Click to claim!" as soon as ANY of it fills, so this claims
         //    partial fills continuously (the order keeps working for the rest).
@@ -377,7 +402,8 @@ public class BazaarMacro {
         }
 
         // 3) Relist anything beaten on price — exact math vs live top-of-book.
-        for (ParsedOrder o : grid) {
+        //    Skipped while daily-limited (relisting re-creates an order = burns limit).
+        for (ParsedOrder o : dailyOk ? grid : List.<ParsedOrder>of()) {
             if (o.filled()) continue;
             FlipCandidate q = api.quote(o.key());
             if (q == null || Double.isNaN(o.pricePerUnit())) continue;
@@ -423,15 +449,27 @@ public class BazaarMacro {
         // 4) Sell claimed goods (fresh competitive price read at listing time).
         if (!pendingSells.isEmpty()) {
             String item = pendingSells.peekFirst();
-            activeItem = item;
-            activeAmount = pendingSellAmounts.getOrDefault(key(item), 0);
-            startNav(item, Phase.SELL_OPEN);
-            return;
+            if (!dailyOk) {
+                // Daily coin limit: creating a sell offer would fail — exit via
+                // instasell instead (an instant sale isn't an "order").
+                pendingInstasell = item;
+                pendingInstasellAmount = Math.max(1, pendingSellAmounts.getOrDefault(key(item), 1));
+                pendingSells.removeFirstOccurrence(item);
+                pendingSellAmounts.remove(key(item));
+                return;
+            }
+            if (slotFree) {
+                activeItem = item;
+                activeAmount = pendingSellAmounts.getOrDefault(key(item), 0);
+                startNav(item, Phase.SELL_OPEN);
+                return;
+            }
+            statusLine = "order slots full — waiting to list " + item;
+            // fall through to monitoring; a slot frees when an order completes
         }
 
         // 5) Open a new buy order with the best-ranked flip we don't hold.
-        if (orders.size() < config.maxOpenOrders && buyCooldown <= 0
-                && grid.size() < BAZAAR_ORDER_CAP) {
+        if (orders.size() < config.maxOpenOrders && buyCooldown <= 0 && slotFree && dailyOk) {
             String pick = pickNextItem(grid);
             if (pick != null) {
                 if (config.dryRun) {

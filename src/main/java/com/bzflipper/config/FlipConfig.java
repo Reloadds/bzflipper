@@ -30,8 +30,16 @@ public class FlipConfig {
     /** Bazaar sell tax fraction used in margin math (0.0125 = 1.25%). */
     public double taxFraction = 0.0125;
 
-    /** How many concurrent BUY orders to keep working at once (Bazaar allows up to 14 total). */
+    /** How many concurrent BUY orders to keep working at once. */
     public int maxOpenOrders = 6;
+
+    /** Total order-slot cap (buys + sells). Base 14; Bazaar Flipper perk raises to
+     *  21/28. Auto-learned from the "maximum of N Bazaar orders" message. */
+    public int maxBazaarOrders = 14;
+
+    /** When the daily coin limit is hit, pause creating new orders for this long
+     *  (it resets at server midnight); claimed goods exit via instasell meanwhile. */
+    public int dailyLimitCooldownMinutes = 60;
 
     /**
      * If true, place orders at our exact computed price (top buy + 0.1 / lowest

@@ -11,6 +11,7 @@ import com.bzflipper.track.ProfitTracker;
 import java.util.Locale;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
@@ -61,6 +62,10 @@ public class BzFlipper implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
         HudRenderCallback.EVENT.register((ctx, tickCounter) -> overlay.render(ctx));
+        // Watch chat for Bazaar limit messages (order-slot cap, daily coin limit).
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
+            if (!overlay) macro.onChatMessage(message.getString());
+        });
 
         System.out.println("[bzflipper] initialized (dryRun=" + config.dryRun + ")");
     }
