@@ -19,10 +19,10 @@ public class FlipConfig {
 
     // ---- Behaviour tuning ----
     /** Ticks between macro actions. 20 ticks = 1 second. Higher = slower & more human. */
-    public int actionDelayTicks = 18;
+    public int actionDelayTicks = 8;
 
     /** Random extra 0..N ticks added to each delay so timing isn't robotic. */
-    public int actionJitterTicks = 12;
+    public int actionJitterTicks = 5;
 
     /** Extra pause (ticks) after placing an order before starting the next one. */
     public int orderCooldownTicks = 40;

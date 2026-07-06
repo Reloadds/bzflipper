@@ -55,6 +55,8 @@ public class BazaarMacro {
 
     private int orderLimit;                 // total slots (learned from chat)
     private long dailyLimitUntil = 0;       // pause new orders until this time
+    private boolean serverClosing = false;  // Hypixel restart in progress → pause
+    private Object lastWorld = null;         // detect world change (rejoin)
 
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
@@ -160,6 +162,9 @@ public class BazaarMacro {
                     + config.dailyLimitCooldownMinutes * 60_000L;
             note("§chit daily Bazaar coin limit§r — pausing new orders "
                     + config.dailyLimitCooldownMinutes + "m; exiting via instasell");
+        } else if (m.contains("about to restart") || m.contains("server is restarting")
+                || m.contains("server closing") || m.contains("restarting in")) {
+            if (!serverClosing) { serverClosing = true; saveState(); note("§eserver restarting — pausing"); }
         }
     }
 
@@ -232,6 +237,7 @@ public class BazaarMacro {
         phase = Phase.PLAN;
         stuckTicks = 0;
         openCooldown = 0;
+        serverClosing = false;
         resetDelay();
 
         GuiDump.reset();
@@ -264,6 +270,15 @@ public class BazaarMacro {
         if (!enabled || mc.player == null) return;
         if (delayTimer > 0) { delayTimer--; return; }
         resetDelay();
+
+        // Server restart handling: pause on the way out; resume after rejoin.
+        if (mc.world != lastWorld) { lastWorld = mc.world; serverClosing = false; }
+        if (serverClosing || serverClosingNow(mc)) {
+            if (!serverClosing) { serverClosing = true; saveState(); log("§eserver restarting — paused until rejoin"); }
+            statusLine = "server restarting — paused";
+            return;
+        }
+
         if (buyCooldown > 0) buyCooldown--;
 
         purse = PurseReader.readPurse(mc);
@@ -719,7 +734,7 @@ public class BazaarMacro {
         if (navCooldown > 0) { navCooldown--; return; }
         var nh = mc.getNetworkHandler();
         if (nh != null) nh.sendChatCommand("bz " + navItem);
-        navCooldown = 6;
+        navCooldown = 4;
     }
 
     private void startNav(String item, Phase after) {
@@ -730,7 +745,7 @@ public class BazaarMacro {
         if (openCooldown > 0) { openCooldown--; statusLine = "opening Bazaar…"; return; }
         var nh = mc.getNetworkHandler();
         if (nh != null) { nh.sendChatCommand("bz"); statusLine = "opening Bazaar (/bz)"; }
-        openCooldown = 6;
+        openCooldown = 4;
     }
 
     // ---- buy ----
@@ -976,6 +991,15 @@ public class BazaarMacro {
         int jitter = config.actionJitterTicks > 0
                 ? (int) (Math.random() * (config.actionJitterTicks + 1)) : 0;
         delayTimer = Math.max(1, config.actionDelayTicks + jitter);
+    }
+
+    /** True if the SkyBlock sidebar shows a restart countdown ("Server closing…"). */
+    private boolean serverClosingNow(MinecraftClient mc) {
+        for (String l : ScoreboardReader.sidebarLines(mc)) {
+            String low = l.toLowerCase(Locale.ROOT);
+            if (low.contains("closing") || low.contains("restarting")) return true;
+        }
+        return false;
     }
 
     private static String fmt1(double v) { return String.format(Locale.ROOT, "%.1f", v); }
