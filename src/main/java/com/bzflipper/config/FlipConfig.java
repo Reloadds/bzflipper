@@ -30,6 +30,13 @@ public class FlipConfig {
     /** How many buy-order slots to keep working at once (v0.1 uses 1). */
     public int maxOpenOrders = 1;
 
+    /**
+     * If true, place orders at our exact computed price (top buy + 0.1 / lowest
+     * sell - 0.1) by typing into the "Custom Price" sign popup, instead of relying
+     * on a preset best-price button.
+     */
+    public boolean useCustomPrice = false;
+
     /** If true, the macro only navigates + reads prices and never places orders. */
     public boolean dryRun = true;
 

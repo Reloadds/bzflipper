@@ -24,9 +24,13 @@ public final class BazaarStrings {
     public static final String BTN_CREATE_BUY  = "create buy order";
     public static final String BTN_CREATE_SELL = "create sell offer";
 
-    // Preset amount buttons (avoid the sign-input popups for v0.1)
+    // Preset amount buttons (avoid the sign-input popups)
     public static final String BTN_BUY_STACK   = "buy 1 stack";     // 64 units
     public static final String BTN_SELL_INV    = "sell inventory";  // sell everything we hold
+
+    // Sign-input options (arbitrary amount / exact price)
+    public static final String BTN_CUSTOM_AMOUNT = "custom amount";
+    public static final String BTN_CUSTOM_PRICE  = "custom price";
 
     // Confirmation / "top of book" price buttons
     public static final String BTN_CONFIRM     = "confirm";

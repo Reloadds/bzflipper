@@ -7,6 +7,8 @@ import com.bzflipper.core.PriceMath;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.Text;
 
+import java.util.Locale;
+
 /**
  * The flipper's brain: a tick-driven, self-healing state machine that runs a
  * full round-trip flip and then loops.
@@ -35,6 +37,7 @@ public class BazaarMacro {
         MONITOR_BUY, CANCEL_BUY, CLAIM_BUY,
         SELL_OPEN, SELL_AMOUNT, SELL_PRICE, SELL_CONFIRM,
         MONITOR_SELL, CANCEL_SELL, CLAIM_SELL,
+        WAIT_SIGN,
         COOLDOWN
     }
 
@@ -53,6 +56,11 @@ public class BazaarMacro {
     // Prices we committed to this flip.
     private double ourBuyPrice = Double.NaN;
     private double ourSellPrice = Double.NaN;
+    private int currentAmount = STACK;
+
+    // Pending sign-popup input (Custom Amount / Custom Price).
+    private String pendingSignText = null;
+    private Phase phaseAfterSign = Phase.IDLE;
 
     // ---- HUD-exposed state ----
     public volatile String statusLine = "idle";
@@ -96,6 +104,18 @@ public class BazaarMacro {
         if (delayTimer > 0) { delayTimer--; return; }
         resetDelay();
 
+        // Handle the Bazaar's "Custom Amount" / "Custom Price" sign popups first:
+        // they aren't chest GUIs, so they'd otherwise trip the check below.
+        if (SignFiller.isSignScreen(mc)) {
+            if (pendingSignText != null) {
+                SignFiller.fill(mc, pendingSignText);
+                log("sign input: " + pendingSignText);
+                pendingSignText = null;
+                phase = phaseAfterSign;
+            }
+            return; // wait for the next chest GUI to open
+        }
+
         if (GuiHelper.openChest(mc) == null) {
             statusLine = "waiting: open the Bazaar";
             return;
@@ -109,8 +129,9 @@ public class BazaarMacro {
         switch (phase) {
             case NAVIGATE_READ -> pNavigateRead(mc, target);
             case BUY_OPEN     -> { if (goToProduct(mc, target) && GuiHelper.clickByName(mc, BazaarStrings.BTN_BUY_ORDER)) phase = Phase.BUY_AMOUNT; }
-            case BUY_AMOUNT   -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BUY_STACK)) phase = Phase.BUY_PRICE; }
+            case BUY_AMOUNT   -> pBuyAmount(mc, target);
             case BUY_PRICE    -> pBuyPrice(mc);
+            case WAIT_SIGN    -> { statusLine = "opening sign popup…"; }
             case BUY_CONFIRM  -> pBuyConfirm(mc, target);
             case MONITOR_BUY  -> pMonitorBuy(mc, target);
             case CANCEL_BUY   -> pCancel(mc, target, BazaarStrings.LORE_SIDE_BUY, Phase.BUY_OPEN);
@@ -156,7 +177,27 @@ public class BazaarMacro {
         phase = Phase.BUY_OPEN;
     }
 
+    private void pBuyAmount(MinecraftClient mc, FlipTarget target) {
+        currentAmount = target.amount > 0 ? target.amount : STACK;
+        if (target.amount > 0) {
+            statusLine = "custom amount: " + target.amount;
+            if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) {
+                requestSign(Integer.toString(target.amount), Phase.BUY_PRICE);
+            }
+        } else {
+            statusLine = "amount: 1 stack";
+            if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BUY_STACK)) phase = Phase.BUY_PRICE;
+        }
+    }
+
     private void pBuyPrice(MinecraftClient mc) {
+        if (config.useCustomPrice) {
+            statusLine = String.format(Locale.ROOT, "custom buy price %.1f", ourBuyPrice);
+            if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) {
+                requestSign(String.format(Locale.ROOT, "%.1f", ourBuyPrice), Phase.BUY_CONFIRM);
+            }
+            return;
+        }
         statusLine = "buy price (top + 0.1)";
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_PRICE)
                 || GuiHelper.hasItemNamed(mc, BazaarStrings.BTN_CREATE_BUY)
@@ -202,6 +243,13 @@ public class BazaarMacro {
     }
 
     private void pSellPrice(MinecraftClient mc) {
+        if (config.useCustomPrice) {
+            statusLine = String.format(Locale.ROOT, "custom sell price %.1f", ourSellPrice);
+            if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) {
+                requestSign(String.format(Locale.ROOT, "%.1f", ourSellPrice), Phase.SELL_CONFIRM);
+            }
+            return;
+        }
         statusLine = "sell price (low - 0.1)";
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_PRICE)
                 || GuiHelper.hasItemNamed(mc, BazaarStrings.BTN_CREATE_SELL)
@@ -240,7 +288,7 @@ public class BazaarMacro {
                 || GuiHelper.clickByName(mc, target.product)) {
             sellsFilled++;
             flipsCompleted++;
-            double profit = (ourSellPrice * (1.0 - config.taxFraction) - ourBuyPrice) * STACK;
+            double profit = (ourSellPrice * (1.0 - config.taxFraction) - ourBuyPrice) * currentAmount;
             estProfit += profit;
             log(String.format("flip complete: ~%,.0f coins profit (total ~%,.0f)", profit, estProfit));
             phase = Phase.COOLDOWN;
@@ -317,6 +365,13 @@ public class BazaarMacro {
         if (config.targets == null || config.targets.isEmpty()) return null;
         if (targetIndex >= config.targets.size()) targetIndex = 0;
         return config.targets.get(targetIndex);
+    }
+
+    /** Queue text for the next sign popup, then idle in WAIT_SIGN until it opens. */
+    private void requestSign(String text, Phase next) {
+        pendingSignText = text;
+        phaseAfterSign = next;
+        phase = Phase.WAIT_SIGN;
     }
 
     private void skipToNext() {

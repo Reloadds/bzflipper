@@ -44,7 +44,12 @@ to a **headless** Mineflayer bot (see roadmap).
 
 - `targets`: which items to flip. `category` / `product` must match the Bazaar's
   on-screen text exactly.
+  - `amount`: units per buy order. `0` = the "buy 1 stack" preset (64). Any
+    value `> 0` is typed into the **Custom Amount** sign popup.
 - `minMargin`: skip a flip unless net margin (after `taxFraction`) clears this.
+- `useCustomPrice`: if `true`, place at our exact computed price (top buy + 0.1 /
+  lowest sell − 0.1) via the **Custom Price** sign popup instead of a preset
+  button.
 - `actionDelayTicks` / `actionJitterTicks`: pacing (20 ticks = 1s). Slower =
   more human.
 - `dryRun`: read-only mode.
@@ -77,7 +82,10 @@ The seam is `GuiHelper` + the state machine's actions. For headless:
 - [x] v0.2 (this): full round-trip loop — buy → monitor → claim → sell →
       monitor → claim → repeat, with **undercut detection + auto-relist** on
       both sides. Manage-Orders anchors in `BazaarStrings` need live tuning.
-- [ ] Custom amount/price via sign-input handling (needed for arbitrary sizes).
+- [x] v0.3 (this): custom amount / exact price via **sign-input handling**
+      (Mixin accessor on the sign screen). Set `amount > 0` per target and/or
+      `useCustomPrice: true`. If sign input misbehaves, check the field name in
+      `mixin/AbstractSignEditScreenAccessor.java` (`messages` vs `text`).
 - [ ] Multi-slot: keep several orders working at once.
 - [ ] **Headless (Mineflayer, 1.21.11):** reimplement the `GuiHelper` seam
       against Mineflayer's `bot.openContainer` / window events; port

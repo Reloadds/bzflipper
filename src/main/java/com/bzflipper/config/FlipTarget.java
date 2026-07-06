@@ -18,6 +18,12 @@ public class FlipTarget {
     /** Skip this item unless the net margin (after tax) is at least this fraction. */
     public double minMargin = 0.04; // 4%
 
+    /**
+     * Units per buy order. 0 = use the "buy 1 stack" preset (64, no sign input).
+     * Any value > 0 is typed into the "Custom Amount" sign popup.
+     */
+    public int amount = 0;
+
     /** Optional human note (ignored by the macro). */
     public String note = "";
 
