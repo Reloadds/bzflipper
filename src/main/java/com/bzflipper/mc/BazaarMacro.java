@@ -6,6 +6,7 @@ import com.bzflipper.api.ItemNames;
 import com.bzflipper.config.FlipConfig;
 import com.bzflipper.config.FlipTarget;
 import com.bzflipper.core.BazaarStrings;
+import com.bzflipper.core.Keys;
 import com.bzflipper.core.PriceMath;
 import com.bzflipper.mc.OrderParser.ParsedOrder;
 import com.bzflipper.track.ProfitTracker;
@@ -50,7 +51,12 @@ public class BazaarMacro {
     /** Ignore price differences below half a tick (float noise). */
     private static final double EPS = PriceMath.TICK / 2;
     /** Don't prune an order from memory until it's had time to appear in the grid. */
-    private static final long PRUNE_AGE_MS = 20_000;
+    private static final long PRUNE_AGE_MS = 90_000;
+    /** Hypixel allows 14 concurrent bazaar orders per player. */
+    private static final int BAZAAR_ORDER_CAP = 14;
+
+    /** Canonical item key (shared with OrderParser/BazaarApi). */
+    private static String key(String s) { return Keys.norm(s); }
 
     private final FlipConfig config;
     private final BazaarApi api;
@@ -85,6 +91,7 @@ public class BazaarMacro {
     private String cancelItem = null;
     private int cancelAmount = 0;
     private boolean cancelBailInstasell = false;  // sell lost its relist war → instasell exit
+    private boolean cancelSilent = false;         // duplicate merge: drop quietly, no blacklist
 
     // Bail-out: goods to dump via "Sell Instantly" (guaranteed immediate exit).
     private String pendingInstasell = null;
@@ -243,11 +250,48 @@ public class BazaarMacro {
             return;
         }
 
+        // 1.7) Merge duplicate orders (one item should be ONE order, not four).
+        //      Buys: cancel the worse-priced twin — refund redeploys the coins.
+        //      Sells: cancel one twin; its units rejoin via the consolidation
+        //      path below and relist as a single combined offer.
+        {
+            Map<String, ParsedOrder> firstBuy = new HashMap<>();
+            Map<String, ParsedOrder> firstSell = new HashMap<>();
+            for (ParsedOrder o : grid) {
+                Map<String, ParsedOrder> m = o.buy() ? firstBuy : firstSell;
+                ParsedOrder prev = m.putIfAbsent(o.key(), o);
+                if (prev == null) continue;
+                if (config.dryRun) { note("DRY: would merge duplicate orders of " + o.item()); continue; }
+                ParsedOrder toCancel;
+                if (o.buy()) {
+                    // keep the better (higher) priced buy — it's ahead in the queue
+                    boolean prevBetter = !Double.isNaN(prev.pricePerUnit())
+                            && (Double.isNaN(o.pricePerUnit()) || prev.pricePerUnit() >= o.pricePerUnit());
+                    toCancel = prevBetter ? o : prev;
+                    if (toCancel == prev) m.put(o.key(), o);
+                    cancelSilent = true;                     // just drop; twin stays
+                    cancelBailInstasell = false;
+                } else {
+                    toCancel = prev.amount() <= o.amount() ? prev : o;
+                    if (toCancel == prev) m.put(o.key(), o);
+                    cancelSilent = false;                    // units re-list merged
+                    cancelBailInstasell = false;
+                }
+                statusLine = "merging duplicate orders: " + o.item();
+                cancelIsBuy = o.buy();
+                cancelRebuy = false;
+                cancelItem = toCancel.item();
+                cancelAmount = toCancel.amount();
+                if (GuiHelper.clickSlotIndex(mc, toCancel.slot())) phase = Phase.CANCEL;
+                return;
+            }
+        }
+
         // 2) Consolidate: if we hold new goods for an item that ALREADY has a live
         //    sell offer, cancel that offer — the returned + new units then get
         //    listed together as one fresh offer at the front of the queue.
         for (String pending : pendingSells) {
-            String key = pending.toLowerCase(Locale.ROOT);
+            String key = key(pending);
             ParsedOrder liveSell = grid.stream()
                     .filter(g -> !g.buy() && g.key().equals(key)).findFirst().orElse(null);
             if (liveSell == null) continue;
@@ -256,6 +300,7 @@ public class BazaarMacro {
             cancelIsBuy = false;
             cancelRebuy = false;
             cancelBailInstasell = false;
+            cancelSilent = false;
             cancelItem = pending;
             cancelAmount = liveSell.amount();
             if (GuiHelper.clickSlotIndex(mc, liveSell.slot())) phase = Phase.CANCEL;
@@ -280,6 +325,7 @@ public class BazaarMacro {
             // Sell side: after too many wars stop relisting — instasell for a
             // guaranteed exit so the capital moves to the next flip.
             cancelBailInstasell = !o.buy() && relists > config.maxRelistsPerOrder;
+            cancelSilent = false;
             cancelItem = o.item();
             cancelAmount = o.amount();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) phase = Phase.CANCEL;
@@ -298,6 +344,7 @@ public class BazaarMacro {
             cancelIsBuy = true;
             cancelRebuy = false;               // pCancel blacklists + drops it
             cancelBailInstasell = false;
+            cancelSilent = false;
             cancelItem = o.item();
             cancelAmount = o.amount();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) phase = Phase.CANCEL;
@@ -308,13 +355,14 @@ public class BazaarMacro {
         if (!pendingSells.isEmpty()) {
             String item = pendingSells.peekFirst();
             activeItem = item;
-            activeAmount = pendingSellAmounts.getOrDefault(item.toLowerCase(Locale.ROOT), 0);
+            activeAmount = pendingSellAmounts.getOrDefault(key(item), 0);
             startNav(item, Phase.SELL_OPEN);
             return;
         }
 
         // 5) Open a new buy order with the best-ranked flip we don't hold.
-        if (orders.size() < config.maxOpenOrders && buyCooldown <= 0) {
+        if (orders.size() < config.maxOpenOrders && buyCooldown <= 0
+                && grid.size() < BAZAAR_ORDER_CAP) {
             String pick = pickNextItem(grid);
             if (pick != null) {
                 if (config.dryRun) {
@@ -355,9 +403,9 @@ public class BazaarMacro {
         long now = System.currentTimeMillis();
         orders.entrySet().removeIf(e -> {
             if (seen.contains(e.getKey())) return false;
-            if (pendingSells.stream().anyMatch(s -> s.toLowerCase(Locale.ROOT).equals(e.getKey()))) return false;
-            if (pendingInstasell != null && pendingInstasell.toLowerCase(Locale.ROOT).equals(e.getKey())) return false;
-            if (activeItem != null && activeItem.toLowerCase(Locale.ROOT).equals(e.getKey())) return false;
+            if (pendingSells.stream().anyMatch(s -> key(s).equals(e.getKey()))) return false;
+            if (pendingInstasell != null && key(pendingInstasell).equals(e.getKey())) return false;
+            if (activeItem != null && key(activeItem).equals(e.getKey())) return false;
             return now - e.getValue().placedAt > PRUNE_AGE_MS;
         });
     }
@@ -406,7 +454,7 @@ public class BazaarMacro {
 
         boolean buyStillOpen = grid.stream().anyMatch(g -> g.buy() && g.key().equals(o.key()));
         boolean stillPending = pendingSells.stream()
-                .anyMatch(s -> s.toLowerCase(Locale.ROOT).equals(o.key()));
+                .anyMatch(s -> key(s).equals(o.key()));
         boolean sellDone = o.filled() || (oi != null && total > 0 && oi.soldSoFar >= total);
         if (sellDone) {
             flipsCompleted++;
@@ -448,14 +496,14 @@ public class BazaarMacro {
         double spendablePerOrder = perOrderBudget();
         Set<String> held = new HashSet<>(orders.keySet());
         for (ParsedOrder o : grid) held.add(o.key());
-        for (String s : pendingSells) held.add(s.toLowerCase(Locale.ROOT));
-        if (pendingInstasell != null) held.add(pendingInstasell.toLowerCase(Locale.ROOT));
+        for (String s : pendingSells) held.add(key(s));
+        if (pendingInstasell != null) held.add(key(pendingInstasell));
 
         if (config.useApiFlips) {
             if (spendablePerOrder <= 0) return null;
             long now = System.currentTimeMillis();
             for (FlipCandidate c : api.getCandidates()) {
-                String key = c.displayName.toLowerCase(Locale.ROOT);
+                String key = key(c.displayName);
                 if (held.contains(key)) continue;
                 if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // relist-war item
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
@@ -467,7 +515,7 @@ public class BazaarMacro {
             return null;
         }
         for (FlipTarget t : config.targets) {
-            if (!held.contains(t.product.toLowerCase(Locale.ROOT))) {
+            if (!held.contains(key(t.product))) {
                 activeHourlyVol = Double.MAX_VALUE;
                 activeBypassInv = false;
                 activeStackSize = 64;
@@ -488,7 +536,7 @@ public class BazaarMacro {
                 ourBuyPrice = PriceMath.buyOrderPrice(topBuy);
                 ourSellPrice = PriceMath.sellOfferPrice(lowSell);
             } else {
-                FlipCandidate q = api.quote(navItem.toLowerCase(Locale.ROOT));
+                FlipCandidate q = api.quote(key(navItem));
                 if (q != null) { ourBuyPrice = q.ourBuyPrice(); ourSellPrice = q.ourSellPrice(); }
             }
             // SAFETY NET: never BUY an item whose LIVE product margin is out of
@@ -497,7 +545,7 @@ public class BazaarMacro {
                 double m = (ourSellPrice * (1 - config.taxFraction) - ourBuyPrice) / ourBuyPrice;
                 if (m < config.apiMinMargin || m > config.apiMaxMargin) {
                     note(String.format(Locale.ROOT, "§eskip %s§r: live margin %.0f%% out of range", navItem, m * 100));
-                    blacklistUntil.put(navItem.toLowerCase(Locale.ROOT),
+                    blacklistUntil.put(key(navItem),
                             System.currentTimeMillis() + config.blacklistMinutes * 60_000L);
                     activeItem = null;
                     phase = Phase.PLAN;
@@ -564,7 +612,7 @@ public class BazaarMacro {
             OrderInfo oi = new OrderInfo();
             oi.buyPrice = ourBuyPrice;
             oi.amount = activeAmount;
-            orders.put(activeItem.toLowerCase(Locale.ROOT), oi);
+            orders.put(key(activeItem), oi);
             ordersPlaced++;
             buyCooldown = config.orderCooldownTicks;
             log(String.format(Locale.ROOT, "§abuy§r %d× %s @ %.1f  (%,.0f coins)",
@@ -578,7 +626,7 @@ public class BazaarMacro {
 
     private boolean priceAggressively() {
         return activeItem != null && relistCounts.getOrDefault(
-                activeItem.toLowerCase(Locale.ROOT), 0) >= config.aggressiveAfterRelists;
+                key(activeItem), 0) >= config.aggressiveAfterRelists;
     }
 
     /** Buy price: normally "top order +0.1"; after repeated relist wars, jump the
@@ -617,7 +665,7 @@ public class BazaarMacro {
 
     private void recordSell() {
         if (activeItem == null) { phase = Phase.PLAN; return; }
-        String key = activeItem.toLowerCase(Locale.ROOT);
+        String key = key(activeItem);
         OrderInfo oi = orders.computeIfAbsent(key, k -> new OrderInfo());
         oi.sellPrice = ourSellPrice;
         if (oi.amount <= 0) oi.amount = activeAmount;
@@ -635,12 +683,16 @@ public class BazaarMacro {
         statusLine = "cancelling " + cancelItem;
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CANCEL_ORDER)
                 || GuiHelper.clickByName(mc, "cancel")) {
-            String key = cancelItem.toLowerCase(Locale.ROOT);
+            String key = key(cancelItem);
             if (cancelIsBuy) {
                 if (cancelRebuy) {
                     log("relisting buy: " + cancelItem);
                     activeItem = cancelItem;
                     startNav(cancelItem, Phase.BUY_OPEN);
+                } else if (cancelSilent) {
+                    // Duplicate merged: the better twin stays; refund redeploys.
+                    log("merged duplicate buy of " + cancelItem + " (refund redeployed)");
+                    phase = Phase.PLAN;
                 } else {
                     // Relist war lost — walk away from this item for a while.
                     blacklistUntil.put(key, System.currentTimeMillis()
@@ -674,7 +726,7 @@ public class BazaarMacro {
     private void pInstasell(MinecraftClient mc) {
         statusLine = "instaselling " + pendingInstasell;
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_INSTASELL)) {
-            String key = pendingInstasell.toLowerCase(Locale.ROOT);
+            String key = key(pendingInstasell);
             OrderInfo oi = orders.remove(key);
             FlipCandidate q = api.quote(key);
             if (oi != null && q != null && !Double.isNaN(oi.buyPrice)) {

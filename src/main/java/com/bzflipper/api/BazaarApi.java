@@ -1,6 +1,7 @@
 package com.bzflipper.api;
 
 import com.bzflipper.config.FlipConfig;
+import com.bzflipper.core.Keys;
 import com.bzflipper.core.PriceMath;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -72,8 +73,8 @@ public class BazaarApi {
     public long lastUpdatedMillis() { return lastUpdatedMillis; }
     public String lastError() { return lastError; }
 
-    /** Live quote for an item by (lowercase) display name, or null. */
-    public FlipCandidate quote(String nameLower) { return quotes.get(nameLower); }
+    /** Live quote for an item by display name (any casing/punctuation), or null. */
+    public FlipCandidate quote(String name) { return quotes.get(Keys.norm(name)); }
 
     /** Seconds since the last successful API refresh, or -1 if never. */
     public long ageSeconds() {
@@ -125,7 +126,7 @@ public class BazaarApi {
                     topBuyOrder, lowestSellOffer, buyMW, sellMW);
             // Every item goes into the quote map (used for exact undercut checks
             // on orders we hold), regardless of the flip filters below.
-            quoteMap.put(c.displayName.toLowerCase(Locale.ROOT), c);
+            quoteMap.put(Keys.norm(c.displayName), c);
 
             double margin = PriceMath.netMarginFraction(topBuyOrder, lowestSellOffer, config.taxFraction);
             // Skip thin spreads AND absurd ones (huge margins are illiquid/manipulation traps).

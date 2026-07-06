@@ -1,6 +1,7 @@
 package com.bzflipper.mc;
 
 import com.bzflipper.core.BazaarStrings;
+import com.bzflipper.core.Keys;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.ItemStack;
 import net.minecraft.screen.GenericContainerScreenHandler;
@@ -30,7 +31,7 @@ public final class OrderParser {
     /** One parsed order from the grid. */
     public record ParsedOrder(int slot, boolean buy, String item, double pricePerUnit,
                               int amount, int claimAmount, double filledPct, boolean claimable) {
-        public String key() { return item.toLowerCase(Locale.ROOT); }
+        public String key() { return Keys.norm(item); }
         public boolean filled() { return filledPct >= 99.99; }
     }
 
