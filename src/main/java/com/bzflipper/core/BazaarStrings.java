@@ -36,9 +36,12 @@ public final class BazaarStrings {
     public static final String BTN_CUSTOM_PRICE  = "custom price";
 
     // Confirmation / competitive price buttons (real Bazaar wording).
-    public static final String BTN_CONFIRM     = "confirm";
-    public static final String BTN_BEST_PRICE  = "+0.1";            // buy:  "top order +0.1"
-    public static final String BTN_BEST_SELL   = "-0.1";            // sell: "best offer -0.1"
+    public static final String BTN_CONFIRM      = "confirm";
+    public static final String BTN_BEST_PRICE   = "+0.1";           // buy:  "top order +0.1"
+    public static final String BTN_BEST_SELL    = "-0.1";           // sell: "best offer -0.1"
+    public static final String BTN_SPREAD_BUY   = "5% of spread";   // aggressive queue-jump (buy)
+    public static final String BTN_SPREAD_SELL  = "10% of spread";  // aggressive queue-jump (sell)
+    public static final String BTN_INSTASELL    = "sell instantly"; // guaranteed immediate exit
 
     // On the "Confirm Buy Order" / "Confirm Sell Offer" screen, the submit button
     // is named "Buy Order" / "Sell Offer" with this in its lore ("Click to submit order!").

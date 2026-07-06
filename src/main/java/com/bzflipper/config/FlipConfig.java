@@ -69,8 +69,8 @@ public class FlipConfig {
     /** If true, pick the best flips live from the API instead of the fixed targets list. */
     public boolean useApiFlips = true;
 
-    /** Seconds between API refreshes (min 15). */
-    public int apiRefreshSeconds = 60;
+    /** Seconds between API refreshes (min 10). Faster = quicker undercut reaction. */
+    public int apiRefreshSeconds = 20;
 
     /** Minimum net margin (after tax) for an API-sourced flip. */
     public double apiMinMargin = 0.03;
@@ -100,6 +100,14 @@ public class FlipConfig {
 
     /** How long a relist-war item stays blacklisted (minutes). */
     public int blacklistMinutes = 30;
+
+    /** After this many relists on one item, price aggressively using the Bazaar's
+     *  "5%/10% of spread" presets to jump the queue and end +0.1 wars. */
+    public int aggressiveAfterRelists = 2;
+
+    /** Cancel a buy order that's still 0% filled after this many minutes (dead
+     *  capital) and redeploy the coins elsewhere. */
+    public int buyStallMinutes = 10;
 
     /** If true, the macro only navigates + reads prices and never places orders. */
     public boolean dryRun = true;

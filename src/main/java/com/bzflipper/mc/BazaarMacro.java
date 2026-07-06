@@ -43,7 +43,7 @@ public class BazaarMacro {
         IDLE, PLAN, NAV_SEARCH, WAIT_SIGN,
         BUY_OPEN, BUY_AMOUNT, BUY_PRICE, BUY_CONFIRM,
         SELL_OPEN, SELL_AMOUNT, SELL_PRICE, SELL_CONFIRM,
-        CANCEL
+        SELL_INSTANT, CANCEL
     }
 
     private static final int STUCK_LIMIT = 40;
@@ -84,6 +84,11 @@ public class BazaarMacro {
     private boolean cancelIsBuy = true;
     private String cancelItem = null;
     private int cancelAmount = 0;
+    private boolean cancelBailInstasell = false;  // sell lost its relist war → instasell exit
+
+    // Bail-out: goods to dump via "Sell Instantly" (guaranteed immediate exit).
+    private String pendingInstasell = null;
+    private int pendingInstasellAmount = 0;
 
     /** Items claimed from filled buy orders, waiting to be listed for sale. */
     private final Deque<String> pendingSells = new ArrayDeque<>();
@@ -199,6 +204,7 @@ public class BazaarMacro {
             case SELL_AMOUNT  -> phase = Phase.SELL_PRICE;   // defensive (unused)
             case SELL_PRICE   -> pSellPrice(mc);
             case SELL_CONFIRM -> pSellConfirm(mc);
+            case SELL_INSTANT -> pInstasell(mc);
             case CANCEL       -> pCancel(mc);
             case IDLE         -> { }
         }
@@ -230,6 +236,13 @@ public class BazaarMacro {
             return; // one action per pass
         }
 
+        // 1.5) Dump bail-out goods via Sell Instantly (guaranteed exit).
+        if (pendingInstasell != null) {
+            activeItem = pendingInstasell;
+            startNav(pendingInstasell, Phase.SELL_INSTANT);
+            return;
+        }
+
         // 2) Consolidate: if we hold new goods for an item that ALREADY has a live
         //    sell offer, cancel that offer — the returned + new units then get
         //    listed together as one fresh offer at the front of the queue.
@@ -242,6 +255,7 @@ public class BazaarMacro {
             statusLine = "consolidating sell: " + pending;
             cancelIsBuy = false;
             cancelRebuy = false;
+            cancelBailInstasell = false;
             cancelItem = pending;
             cancelAmount = liveSell.amount();
             if (GuiHelper.clickSlotIndex(mc, liveSell.slot())) phase = Phase.CANCEL;
@@ -263,6 +277,27 @@ public class BazaarMacro {
             cancelIsBuy = o.buy();
             // Buy side: give up after too many relist wars (manipulated/contested item).
             cancelRebuy = !o.buy() || relists <= config.maxRelistsPerOrder;
+            // Sell side: after too many wars stop relisting — instasell for a
+            // guaranteed exit so the capital moves to the next flip.
+            cancelBailInstasell = !o.buy() && relists > config.maxRelistsPerOrder;
+            cancelItem = o.item();
+            cancelAmount = o.amount();
+            if (GuiHelper.clickSlotIndex(mc, o.slot())) phase = Phase.CANCEL;
+            return;
+        }
+
+        // 3.5) Exit dead buy orders: 0% filled after buyStallMinutes means the
+        //      coins are doing nothing — cancel, blacklist briefly, redeploy.
+        long tNow = System.currentTimeMillis();
+        for (ParsedOrder o : grid) {
+            if (!o.buy() || o.filledPct() > 0 || o.claimable()) continue;
+            OrderInfo oi = orders.get(o.key());
+            if (oi == null || tNow - oi.placedAt < config.buyStallMinutes * 60_000L) continue;
+            if (config.dryRun) { note("DRY: would exit stalled " + o.item()); continue; }
+            statusLine = "stalled " + o.item() + " — freeing capital";
+            cancelIsBuy = true;
+            cancelRebuy = false;               // pCancel blacklists + drops it
+            cancelBailInstasell = false;
             cancelItem = o.item();
             cancelAmount = o.amount();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) phase = Phase.CANCEL;
@@ -307,14 +342,21 @@ public class BazaarMacro {
                 oi.amount = o.amount();
                 if (o.buy()) oi.buyPrice = o.pricePerUnit(); else oi.sellPrice = o.pricePerUnit();
                 orders.put(o.key(), oi);
-            } else if (!o.buy() && Double.isNaN(oi.sellPrice)) {
-                oi.sellPrice = o.pricePerUnit();
+            } else {
+                // The grid is the truth — keep our records synced to the actual
+                // placed prices (preset buttons can land ±0.1 from our estimate).
+                if (!Double.isNaN(o.pricePerUnit())) {
+                    if (o.buy()) oi.buyPrice = o.pricePerUnit();
+                    else oi.sellPrice = o.pricePerUnit();
+                }
+                if (oi.amount <= 0) oi.amount = o.amount();
             }
         }
         long now = System.currentTimeMillis();
         orders.entrySet().removeIf(e -> {
             if (seen.contains(e.getKey())) return false;
             if (pendingSells.stream().anyMatch(s -> s.toLowerCase(Locale.ROOT).equals(e.getKey()))) return false;
+            if (pendingInstasell != null && pendingInstasell.toLowerCase(Locale.ROOT).equals(e.getKey())) return false;
             if (activeItem != null && activeItem.toLowerCase(Locale.ROOT).equals(e.getKey())) return false;
             return now - e.getValue().placedAt > PRUNE_AGE_MS;
         });
@@ -407,6 +449,7 @@ public class BazaarMacro {
         Set<String> held = new HashSet<>(orders.keySet());
         for (ParsedOrder o : grid) held.add(o.key());
         for (String s : pendingSells) held.add(s.toLowerCase(Locale.ROOT));
+        if (pendingInstasell != null) held.add(pendingInstasell.toLowerCase(Locale.ROOT));
 
         if (config.useApiFlips) {
             if (spendablePerOrder <= 0) return null;
@@ -533,16 +576,28 @@ public class BazaarMacro {
 
     // ---- sell ----
 
-    /** Buy price: use the "top order +0.1" preset (exactly our competitive price). */
+    private boolean priceAggressively() {
+        return activeItem != null && relistCounts.getOrDefault(
+                activeItem.toLowerCase(Locale.ROOT), 0) >= config.aggressiveAfterRelists;
+    }
+
+    /** Buy price: normally "top order +0.1"; after repeated relist wars, jump the
+     *  queue with "5% of spread" so +0.1 ping-pong ends. */
     private void pBuyPrice(MinecraftClient mc) {
+        if (priceAggressively() && GuiHelper.clickByName(mc, BazaarStrings.BTN_SPREAD_BUY)) {
+            phase = Phase.BUY_CONFIRM; return;
+        }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_PRICE)) { phase = Phase.BUY_CONFIRM; return; }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) {
             requestSign(fmt1(ourBuyPrice), Phase.BUY_CONFIRM);   // fallback: type it
         }
     }
 
-    /** Sell price: use the "best offer -0.1" preset. */
+    /** Sell price: normally "best offer -0.1"; after wars, "10% of spread". */
     private void pSellPrice(MinecraftClient mc) {
+        if (priceAggressively() && GuiHelper.clickByName(mc, BazaarStrings.BTN_SPREAD_SELL)) {
+            phase = Phase.SELL_CONFIRM; return;
+        }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_SELL)) { phase = Phase.SELL_CONFIRM; return; }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) {
             requestSign(fmt1(ourSellPrice), Phase.SELL_CONFIRM);
@@ -596,6 +651,14 @@ public class BazaarMacro {
                             + config.blacklistMinutes + "m");
                     phase = Phase.PLAN;
                 }
+            } else if (cancelBailInstasell) {
+                // Sell war lost — dump the returned units instantly instead.
+                pendingInstasell = cancelItem;
+                pendingInstasellAmount = Math.max(1, cancelAmount);
+                pendingSells.removeFirstOccurrence(cancelItem);
+                pendingSellAmounts.remove(key);
+                log("§esell war lost on " + cancelItem + " — instaselling for a clean exit");
+                phase = Phase.PLAN;
             } else {
                 // Unsold units return to the inventory — queue them (merged with
                 // any newly claimed units) to be listed as ONE fresh offer.
@@ -604,6 +667,31 @@ public class BazaarMacro {
                 log("relisting sell: " + cancelItem);
                 phase = Phase.PLAN;
             }
+        }
+    }
+
+    /** On the product page: click "Sell Instantly" — an immediate guaranteed exit. */
+    private void pInstasell(MinecraftClient mc) {
+        statusLine = "instaselling " + pendingInstasell;
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_INSTASELL)) {
+            String key = pendingInstasell.toLowerCase(Locale.ROOT);
+            OrderInfo oi = orders.remove(key);
+            FlipCandidate q = api.quote(key);
+            if (oi != null && q != null && !Double.isNaN(oi.buyPrice)) {
+                double profit = (q.topBuyOrder * (1.0 - config.taxFraction) - oi.buyPrice)
+                        * pendingInstasellAmount;
+                tracker.addProfit(profit);
+                log(String.format(Locale.ROOT, "§ebailed§r %d× %s  %+,.0f coins",
+                        pendingInstasellAmount, pendingInstasell, profit));
+            } else {
+                log("instasold " + pendingInstasell);
+            }
+            relistCounts.remove(key);
+            blacklistUntil.put(key, System.currentTimeMillis()
+                    + config.blacklistMinutes * 60_000L);
+            pendingInstasell = null;
+            activeItem = null;
+            phase = Phase.PLAN;
         }
     }
 

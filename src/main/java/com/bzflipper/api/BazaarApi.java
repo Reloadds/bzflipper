@@ -61,7 +61,7 @@ public class BazaarApi {
             return t;
         });
         exec.scheduleWithFixedDelay(this::refreshSafe, 0,
-                Math.max(15, config.apiRefreshSeconds), TimeUnit.SECONDS);
+                Math.max(10, config.apiRefreshSeconds), TimeUnit.SECONDS);
     }
 
     public void stop() {
