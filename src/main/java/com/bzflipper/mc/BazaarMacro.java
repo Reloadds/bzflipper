@@ -64,6 +64,7 @@ public class BazaarMacro {
     private String pendingSellItem = null;
     private String cancelSide = BazaarStrings.LORE_SIDE_BUY;
     private boolean cancelRelistIsBuy = true;
+    private String lastNote = "";   // de-dupes the self-diagnosis chat line
 
     // Per-item economics for accurate profit accounting.
     private static final class OrderInfo { double buyPrice; int amount; double sellPrice = Double.NaN; }
@@ -204,13 +205,33 @@ public class BazaarMacro {
         if (buyCount < config.maxOpenOrders) {
             String pick = pickNextItem(active);
             if (pick != null) {
-                if (config.dryRun) { statusLine = "DRY: would buy " + pick; return; }
+                if (config.dryRun) {
+                    statusLine = "DRY: would buy " + pick;
+                    note("§eDRY RUN§r is on — would buy §f" + pick
+                            + "§r. Set §fdryRun:false§r in config/bzflipper.json to actually trade.");
+                    return;
+                }
                 activeItem = pick;
                 startNav(pick, Phase.BUY_OPEN);
                 return;
             }
         }
-        statusLine = String.format(Locale.ROOT, "monitoring — %d buys / %d sells", buyCount, sellCount);
+        String reason = diagnoseIdle();
+        statusLine = reason;
+        note(reason);
+    }
+
+    /** Explains, in one line, why the flipper isn't opening any orders right now. */
+    private String diagnoseIdle() {
+        var cs = api.getCandidates();
+        if (Double.isNaN(purse)) return "idle: purse UNKNOWN — sidebar not read (are you on SkyBlock?)";
+        if (cs.isEmpty()) return "idle: 0 flips from API"
+                + (api.lastError() != null ? " (error: " + api.lastError() + ")" : " (still loading — wait ~1 min)");
+        double spend = (purse - config.coinReserve) * config.orderBudgetFraction;
+        if (spend <= 0) return String.format(Locale.ROOT,
+                "idle: nothing spendable (purse %,.0f − reserve %,.0f)", purse, config.coinReserve);
+        return String.format(Locale.ROOT,
+                "idle: %d flips found but none affordable/free right now (per-order budget %,.0f)", cs.size(), spend);
     }
 
     /** First filled order on the given side (checks both "100%" and "filled!" wording). */
@@ -449,5 +470,12 @@ public class BazaarMacro {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player != null) mc.player.sendMessage(Text.literal("§b[BZ] §r" + msg), false);
         System.out.println("[bzflipper] " + msg);
+    }
+
+    /** Log to chat only when the message changes, so repeated idle states don't spam. */
+    private void note(String msg) {
+        if (msg.equals(lastNote)) return;
+        lastNote = msg;
+        log(msg);
     }
 }
