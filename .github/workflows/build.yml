@@ -24,11 +24,13 @@ jobs:
           YARN=$(curl -s "https://meta.fabricmc.net/v2/versions/yarn/$MC" | jq -r '.[0].version // empty')
           LOADER=$(curl -s "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[]|select(.stable==true)][0].version // empty')
           FAPI=$(curl -s "https://api.modrinth.com/v2/project/fabric-api/version?game_versions=%5B%22$MC%22%5D&loaders=%5B%22fabric%22%5D" | jq -r '.[0].version_number // empty')
-          # Newest published Loom release (needs to understand the latest Yarn "unpick" format).
+          # Loom is published as rolling -SNAPSHOT builds per major.minor line.
+          # Take the newest release number and use its SNAPSHOT line (what actually resolves).
           META=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-loom/maven-metadata.xml)
-          echo "Loom versions available (tail):"; echo "$META" | grep -oP '(?<=<version>)[^<]+' | tail -20
-          LOOM=$(echo "$META" | grep -oP '(?<=<release>)[^<]+' | head -1)
-          [ -z "$LOOM" ] && LOOM=$(echo "$META" | grep -oP '(?<=<version>)[^<]+' | grep -v SNAPSHOT | tail -1)
+          LOOM_REL=$(echo "$META" | grep -oP '(?<=<release>)[^<]+' | head -1)
+          [ -z "$LOOM_REL" ] && LOOM_REL=$(echo "$META" | grep -oP '(?<=<latest>)[^<]+' | head -1)
+          LOOM_MM=$(echo "$LOOM_REL" | grep -oE '^[0-9]+\.[0-9]+')
+          LOOM="${LOOM_MM}-SNAPSHOT"
 
           echo "Resolved -> yarn=$YARN  loader=$LOADER  fabric-api=$FAPI  loom=$LOOM"
 
