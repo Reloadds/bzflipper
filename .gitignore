@@ -3,6 +3,7 @@
 build/
 run/
 out/
+dist/
 
 # IDE
 .idea/
