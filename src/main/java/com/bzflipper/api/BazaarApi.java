@@ -1,0 +1,138 @@
+package com.bzflipper.api;
+
+import com.bzflipper.config.FlipConfig;
+import com.bzflipper.core.PriceMath;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Pulls the live Bazaar order book from Hypixel's public API (no key needed) on
+ * a background thread and ranks the best flips with PriceMath. The rest of the
+ * mod reads {@link #getCandidates()} — a cheap volatile snapshot — so nothing
+ * touches the network on the render/tick thread.
+ *
+ * Endpoint: https://api.hypixel.net/v2/skyblock/bazaar
+ *   products.<TAG>.buy_summary[0].pricePerUnit  = highest buy order  (we outbid)
+ *   products.<TAG>.sell_summary[0].pricePerUnit = lowest  sell offer (we undercut)
+ *   products.<TAG>.quick_status.{buyMovingWeek, sellMovingWeek} = weekly volume
+ *
+ * NOTE: Hypixel's field naming is famously inverted; we deliberately use the
+ * order-book summaries (unambiguous) rather than quick_status.buyPrice/sellPrice.
+ */
+public class BazaarApi {
+
+    private static final String URL = "https://api.hypixel.net/v2/skyblock/bazaar";
+
+    private final FlipConfig config;
+    private final HttpClient http = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10)).build();
+
+    private volatile List<FlipCandidate> candidates = List.of();
+    private volatile long lastUpdatedMillis = 0;
+    private volatile String lastError = null;
+
+    private ScheduledExecutorService exec;
+
+    public BazaarApi(FlipConfig config) {
+        this.config = config;
+    }
+
+    public void start() {
+        if (exec != null) return;
+        exec = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "bzflipper-api");
+            t.setDaemon(true);
+            return t;
+        });
+        exec.scheduleWithFixedDelay(this::refreshSafe, 0,
+                Math.max(15, config.apiRefreshSeconds), TimeUnit.SECONDS);
+    }
+
+    public void stop() {
+        if (exec != null) { exec.shutdownNow(); exec = null; }
+    }
+
+    public List<FlipCandidate> getCandidates() { return candidates; }
+    public long lastUpdatedMillis() { return lastUpdatedMillis; }
+    public String lastError() { return lastError; }
+
+    private void refreshSafe() {
+        try { refresh(); lastError = null; }
+        catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
+            System.err.println("[bzflipper] bazaar API refresh failed: " + lastError);
+        }
+    }
+
+    private void refresh() throws Exception {
+        HttpRequest req = HttpRequest.newBuilder(URI.create(URL))
+                .header("User-Agent", "bzflipper")
+                .timeout(Duration.ofSeconds(20))
+                .GET().build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 200) throw new IllegalStateException("HTTP " + resp.statusCode());
+
+        JsonObject root = JsonParser.parseString(resp.body()).getAsJsonObject();
+        if (!root.has("success") || !root.get("success").getAsBoolean()) {
+            throw new IllegalStateException("API success=false");
+        }
+        JsonObject products = root.getAsJsonObject("products");
+        List<FlipCandidate> list = new ArrayList<>();
+
+        for (Map.Entry<String, com.google.gson.JsonElement> e : products.entrySet()) {
+            JsonObject p = e.getValue().getAsJsonObject();
+            JsonArray buys = p.getAsJsonArray("buy_summary");
+            JsonArray sells = p.getAsJsonArray("sell_summary");
+            if (buys == null || sells == null || buys.isEmpty() || sells.isEmpty()) continue;
+
+            double topBuy = buys.get(0).getAsJsonObject().get("pricePerUnit").getAsDouble();
+            double lowSell = sells.get(0).getAsJsonObject().get("pricePerUnit").getAsDouble();
+            if (topBuy <= 0 || lowSell <= 0) continue;
+
+            JsonObject q = p.getAsJsonObject("quick_status");
+            double buyMW = q.get("buyMovingWeek").getAsDouble();
+            double sellMW = q.get("sellMovingWeek").getAsDouble();
+
+            double margin = PriceMath.netMarginFraction(topBuy, lowSell, config.taxFraction);
+            if (margin < config.apiMinMargin) continue;
+            if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
+            if (config.apiMaxUnitPrice > 0 && topBuy > config.apiMaxUnitPrice) continue;
+
+            list.add(new FlipCandidate(e.getKey(), displayName(e.getKey()),
+                    topBuy, lowSell, buyMW, sellMW));
+        }
+
+        list.sort((a, b) -> Double.compare(b.score(config.taxFraction), a.score(config.taxFraction)));
+        candidates = List.copyOf(list.subList(0, Math.min(list.size(), 30)));
+        lastUpdatedMillis = System.currentTimeMillis();
+    }
+
+    /**
+     * Best-effort tag -> Bazaar display name (ENCHANTED_CACTUS_GREEN -> "Enchanted
+     * Cactus Green"). Correct for most items; a handful of Bazaar names don't map
+     * cleanly from the tag — for those, add explicit config targets instead.
+     */
+    static String displayName(String tag) {
+        String[] parts = tag.toLowerCase(Locale.ROOT).split("_");
+        StringBuilder sb = new StringBuilder();
+        for (String w : parts) {
+            if (w.isEmpty()) continue;
+            sb.append(Character.toUpperCase(w.charAt(0))).append(w.substring(1)).append(' ');
+        }
+        return sb.toString().trim();
+    }
+}

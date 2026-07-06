@@ -18,6 +18,9 @@ public final class BazaarStrings {
     public static final String TITLE_BAZAAR      = "bazaar";        // main bazaar / category screens
     public static final String TITLE_ORDER_SETUP = "order";         // "Order options", "Buy Order", etc.
 
+    // Search-based navigation (used by the portfolio flipper to reach any item).
+    public static final String BTN_SEARCH        = "search";        // the Bazaar search button
+
     // --- Buttons / items we click (matched as "name contains ...") ---
     public static final String BTN_BUY_ORDER   = "buy order";
     public static final String BTN_SELL_OFFER  = "sell offer";

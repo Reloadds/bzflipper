@@ -1,8 +1,10 @@
 package com.bzflipper;
 
+import com.bzflipper.api.BazaarApi;
 import com.bzflipper.config.FlipConfig;
 import com.bzflipper.hud.Overlay;
 import com.bzflipper.mc.BazaarMacro;
+import com.bzflipper.track.ProfitTracker;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
@@ -30,8 +32,12 @@ public class BzFlipper implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         config = FlipConfig.load();
-        macro = new BazaarMacro(config);
+        BazaarApi api = new BazaarApi(config);
+        ProfitTracker tracker = new ProfitTracker();
+        macro = new BazaarMacro(config, api, tracker);
         overlay = new Overlay(macro);
+
+        if (config.useApiFlips) api.start();
 
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.bzflipper.toggle", InputUtil.Type.KEYSYM,

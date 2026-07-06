@@ -52,7 +52,43 @@ to a **headless** Mineflayer bot (see roadmap).
   button.
 - `actionDelayTicks` / `actionJitterTicks`: pacing (20 ticks = 1s). Slower =
   more human.
-- `dryRun`: read-only mode.
+- `dryRun`: plan-only mode — reads purse, ranks flips, shows the HUD, but never
+  places an order. Great for a first safe watch.
+
+### Purse-aware spending
+- `coinReserve`: never let the purse drop below this.
+- `orderBudgetFraction`: fraction of spendable purse (`purse − reserve`) per order.
+- `maxUnitsPerOrder`: hard cap on units per order (Bazaar's own limit is 71,680).
+- `maxOpenOrders`: how many concurrent buy orders to keep working.
+
+Because Hypixel escrows coins the moment a buy order is placed, the live purse
+read naturally reflects committed coins — so it stops opening orders when funds
+run low, no separate bookkeeping needed.
+
+### Auto flip sourcing (Hypixel Bazaar API)
+Set `useApiFlips: true` to pick the best flips live instead of the fixed
+`targets` list. Data comes from `https://api.hypixel.net/v2/skyblock/bazaar`
+(no key), fetched on a background thread and ranked by **net margin × liquidity**.
+- `apiRefreshSeconds`, `apiMinMargin`, `apiMinWeeklyVolume`, `apiMaxUnitPrice`.
+
+> Note: Coflnet's public bazaar endpoints track *your own* orders/flips (and need
+> a key); they aren't a "best flips now" feed. The official Hypixel Bazaar API is
+> the correct live source and is what Coflnet itself ingests.
+
+### Live coins/hour
+The HUD shows total realized profit, a whole-session rate, and a rolling
+10-minute "recent" rate that reacts to how it's flipping right now. Purse is read
+from the SkyBlock sidebar (`PurseReader`); if it reads `—`, the sidebar wording
+changed — adjust the regex there.
+
+### Known tuning points (need live confirmation)
+- **Manage-Orders anchors** in `BazaarStrings` (`LORE_FILLED`, `LORE_OUTBID`,
+  `LORE_SIDE_BUY/SELL`, `BTN_CANCEL_ORDER`).
+- **Search navigation** (`BTN_SEARCH`) — the portfolio reaches items via the
+  Bazaar search sign.
+- **Tag→name mapping** for API items is best-effort; items whose Bazaar name
+  differs from the auto-derived name won't be found via search — add them as
+  explicit `targets` (with `useApiFlips: false`) if needed.
 
 ### Tuning the GUI matching
 
@@ -82,11 +118,13 @@ The seam is `GuiHelper` + the state machine's actions. For headless:
 - [x] v0.2 (this): full round-trip loop — buy → monitor → claim → sell →
       monitor → claim → repeat, with **undercut detection + auto-relist** on
       both sides. Manage-Orders anchors in `BazaarStrings` need live tuning.
-- [x] v0.3 (this): custom amount / exact price via **sign-input handling**
+- [x] v0.3: custom amount / exact price via **sign-input handling**
       (Mixin accessor on the sign screen). Set `amount > 0` per target and/or
       `useCustomPrice: true`. If sign input misbehaves, check the field name in
       `mixin/AbstractSignEditScreenAccessor.java` (`messages` vs `text`).
-- [ ] Multi-slot: keep several orders working at once.
+- [x] v0.4 (this): **multi-slot portfolio** + **purse-aware sizing** + **live
+      coins/hr HUD** + **auto flip sourcing** from the Hypixel Bazaar API.
+- [ ] Headless Mineflayer port (reuses PriceMath + BazaarApi + the state machine).
 - [ ] **Headless (Mineflayer, 1.21.11):** reimplement the `GuiHelper` seam
       against Mineflayer's `bot.openContainer` / window events; port
       `PriceMath` + the state machine logic 1:1. Attach `prismarine-viewer`

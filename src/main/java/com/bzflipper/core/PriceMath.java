@@ -70,4 +70,26 @@ public final class PriceMath {
     public static boolean sellOfferUndercut(double ourSellPrice, double currentLowestSell) {
         return currentLowestSell < ourSellPrice - 1e-9;
     }
+
+    /** Net profit per unit after tax (coins), at competitive prices. */
+    public static double profitPerUnit(double topBuyOrder, double lowestSellOffer, double taxFraction) {
+        return sellOfferPrice(lowestSellOffer) * (1.0 - taxFraction) - buyOrderPrice(topBuyOrder);
+    }
+
+    /**
+     * Ranking score for choosing between flips: net margin weighted by liquidity
+     * (log of weekly volume) so we prefer items that actually fill. An illiquid
+     * high-margin trap scores low. Bounded at 0 for unprofitable flips.
+     */
+    public static double flipScore(double margin, double buyWeekVol, double sellWeekVol) {
+        double liquidity = Math.log1p(Math.max(0, Math.min(buyWeekVol, sellWeekVol)));
+        return Math.max(0, margin) * liquidity;
+    }
+
+    /** Max whole units affordable for {@code spendableCoins} at {@code unitBuyPrice}, capped. */
+    public static int affordableUnits(double spendableCoins, double unitBuyPrice, int cap) {
+        if (unitBuyPrice <= 0 || spendableCoins <= 0) return 0;
+        long n = (long) Math.floor(spendableCoins / unitBuyPrice);
+        return (int) Math.max(0, Math.min(n, cap));
+    }
 }

@@ -12,8 +12,10 @@ import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -140,6 +142,72 @@ public final class GuiHelper {
             if (line.contains(l)) return true;
         }
         return false;
+    }
+
+    /** Display name of the item in chest slot {@code idx}, or "". */
+    public static String itemNameAt(MinecraftClient mc, int idx) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null || idx < 0 || idx >= chestSlotCount(chest)) return "";
+        return name(chest.getSlot(idx).getStack());
+    }
+
+    /**
+     * First chest slot whose lore contains ALL of {@code loreNeedles} (each needle
+     * may match a different line). Used to find, e.g., a filled sell order. -1 if none.
+     */
+    public static int firstSlotWithLore(MinecraftClient mc, String... loreNeedles) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return -1;
+        int count = chestSlotCount(chest);
+        for (int i = 0; i < count; i++) {
+            List<String> lore = lore(chest.getSlot(i).getStack());
+            if (lore.isEmpty()) continue;
+            boolean all = true;
+            for (String needle : loreNeedles) {
+                String n = needle.toLowerCase(Locale.ROOT);
+                boolean found = false;
+                for (String line : lore) if (line.contains(n)) { found = true; break; }
+                if (!found) { all = false; break; }
+            }
+            if (all) return i;
+        }
+        return -1;
+    }
+
+    /** Count chest slots whose lore contains {@code loreNeedle}. */
+    public static int countSlotsWithLore(MinecraftClient mc, String loreNeedle) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return 0;
+        String n = loreNeedle.toLowerCase(Locale.ROOT);
+        int count = chestSlotCount(chest), hits = 0;
+        for (int i = 0; i < count; i++) {
+            for (String line : lore(chest.getSlot(i).getStack())) {
+                if (line.contains(n)) { hits++; break; }
+            }
+        }
+        return hits;
+    }
+
+    /** Lowercased names of every non-empty chest slot (excludes player inventory). */
+    public static Set<String> collectNames(MinecraftClient mc) {
+        Set<String> out = new HashSet<>();
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return out;
+        int count = chestSlotCount(chest);
+        for (int i = 0; i < count; i++) {
+            String nm = name(chest.getSlot(i).getStack());
+            if (!nm.isEmpty()) out.add(nm);
+        }
+        return out;
+    }
+
+    /** Left-click a specific chest slot index. True if clicked. */
+    public static boolean clickSlotIndex(MinecraftClient mc, int idx) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null || idx < 0 || idx >= chestSlotCount(chest)
+                || mc.interactionManager == null || mc.player == null) return false;
+        mc.interactionManager.clickSlot(chest.syncId, idx, 0, SlotActionType.PICKUP, mc.player);
+        return true;
     }
 
     // Matches numbers like "1,234,567.8" possibly followed by "coins".
