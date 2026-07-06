@@ -92,6 +92,7 @@ public class BazaarMacro {
         double sellPrice = Double.NaN;
         int amount;
         int claimedSoFar = 0;       // units already claimed from a partially-filled buy
+        int soldSoFar = 0;          // units already sold+claimed from the sell offer
         long placedAt = System.currentTimeMillis();
     }
     private final Map<String, OrderInfo> orders = new HashMap<>();
@@ -187,11 +188,13 @@ public class BazaarMacro {
             case WAIT_SIGN    -> statusLine = "waiting for sign…";
             case BUY_OPEN     -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BUY_ORDER)) phase = Phase.BUY_AMOUNT; }
             case BUY_AMOUNT   -> pBuyAmount(mc);
-            case BUY_PRICE    -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) requestSign(fmt1(ourBuyPrice), Phase.BUY_CONFIRM); }
+            case BUY_PRICE    -> pBuyPrice(mc);
             case BUY_CONFIRM  -> pBuyConfirm(mc);
-            case SELL_OPEN    -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_OFFER)) phase = Phase.SELL_AMOUNT; }
-            case SELL_AMOUNT  -> pSellAmount(mc);
-            case SELL_PRICE   -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) requestSign(fmt1(ourSellPrice), Phase.SELL_CONFIRM); }
+            // "Create Sell Offer" sells all held items and jumps straight to the
+            // price screen — there is NO amount step on the sell side.
+            case SELL_OPEN    -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_OFFER)) phase = Phase.SELL_PRICE; }
+            case SELL_AMOUNT  -> phase = Phase.SELL_PRICE;   // defensive (unused)
+            case SELL_PRICE   -> pSellPrice(mc);
             case SELL_CONFIRM -> pSellConfirm(mc);
             case CANCEL       -> pCancel(mc);
             case IDLE         -> { }
@@ -210,13 +213,11 @@ public class BazaarMacro {
 
         adoptAndPrune(grid);
 
-        // 1) Claim goods as they fill — full orders always; partial buys once
-        //    enough is filled to be worth listing (partialClaimFraction).
+        // 1) Claim goods/coins the moment they're claimable — Hypixel marks an
+        //    order "Click to claim!" as soon as ANY of it fills, so this claims
+        //    partial fills continuously (the order keeps working for the rest).
         for (ParsedOrder o : grid) {
-            boolean claimNow = o.filled()
-                    || (o.buy() && o.claimable()
-                        && o.filledPct() >= config.partialClaimFraction * 100);
-            if (!claimNow) continue;
+            if (!o.claimable()) continue;
             if (config.dryRun) { note("DRY: would claim " + o.item()); continue; }
             statusLine = "claiming " + (o.buy() ? "bought " : "sold ") + o.item();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) {
@@ -321,12 +322,10 @@ public class BazaarMacro {
         if (Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
         if (oi.amount <= 0) oi.amount = o.amount();
 
-        // Estimate the units this claim just banked (fill % minus already claimed).
-        int estFilled = o.filled() ? o.amount()
-                : (int) Math.floor(o.amount() * o.filledPct() / 100.0);
-        int newUnits = Math.max(0, estFilled - oi.claimedSoFar);
-        if (newUnits == 0) newUnits = Math.max(1, o.amount() - oi.claimedSoFar);
-        oi.claimedSoFar = Math.min(o.amount(), oi.claimedSoFar + newUnits);
+        // Units this claim banks: the grid tells us exactly ("N items to claim").
+        int newUnits = o.claimAmount() > 0 ? o.claimAmount()
+                : Math.max(1, (int) Math.floor(o.amount() * o.filledPct() / 100.0) - oi.claimedSoFar);
+        oi.claimedSoFar = Math.min(Math.max(o.amount(), 1), oi.claimedSoFar + newUnits);
 
         buysFilled++;
         if (!pendingSells.contains(o.item())) pendingSells.addLast(o.item());
@@ -337,31 +336,42 @@ public class BazaarMacro {
     }
 
     private void onSellClaimed(ParsedOrder o, List<ParsedOrder> grid) {
-        sellsFilled++;
-        flipsCompleted++;
         OrderInfo oi = orders.get(o.key());
         double sellP = !Double.isNaN(o.pricePerUnit()) ? o.pricePerUnit()
                 : (oi != null ? oi.sellPrice : Double.NaN);
         double buyP = oi != null ? oi.buyPrice : Double.NaN;
-        int amt = o.amount() > 0 ? o.amount() : (oi != null ? oi.amount : 0);
-        if (!Double.isNaN(buyP) && !Double.isNaN(sellP) && amt > 0) {
-            double profit = (sellP * (1.0 - config.taxFraction) - buyP) * amt;
+        int total = o.amount() > 0 ? o.amount() : (oi != null ? oi.amount : 0);
+
+        // Book profit only on the units newly sold since the last claim.
+        int estSold = o.filled() ? total : (int) Math.floor(total * o.filledPct() / 100.0);
+        int prevSold = oi != null ? oi.soldSoFar : 0;
+        int newSold = Math.max(0, estSold - prevSold);
+        if (newSold == 0) newSold = Math.max(1, total - prevSold);   // claimable but % unreadable
+        if (oi != null) oi.soldSoFar = prevSold + newSold;
+
+        sellsFilled++;
+        if (!Double.isNaN(buyP) && !Double.isNaN(sellP)) {
+            double profit = (sellP * (1.0 - config.taxFraction) - buyP) * newSold;
             tracker.addProfit(profit);
-            log(String.format(Locale.ROOT, "§aflip done§r: %s  %+,.0f coins  (session %,.0f)",
-                    o.item(), profit, tracker.total()));
+            log(String.format(Locale.ROOT, "§asold§r %d× %s  %+,.0f coins  (session %,.0f)",
+                    newSold, o.item(), profit, tracker.total()));
         } else {
             log("claimed sold " + o.item() + " (buy price unknown — profit not tracked)");
         }
-        // Keep the entry if this item's BUY order is still working (partial-claim
-        // flow); otherwise the flip is fully closed.
+
         boolean buyStillOpen = grid.stream().anyMatch(g -> g.buy() && g.key().equals(o.key()));
         boolean stillPending = pendingSells.stream()
                 .anyMatch(s -> s.toLowerCase(Locale.ROOT).equals(o.key()));
-        if (oi != null) {
-            oi.sellPrice = Double.NaN;
-            if (!buyStillOpen && !stillPending) {
-                orders.remove(o.key());
-                relistCounts.remove(o.key());
+        boolean sellDone = o.filled() || (oi != null && total > 0 && oi.soldSoFar >= total);
+        if (sellDone) {
+            flipsCompleted++;
+            if (oi != null) {
+                oi.sellPrice = Double.NaN;
+                oi.soldSoFar = 0;
+                if (!buyStillOpen && !stillPending) {
+                    orders.remove(o.key());
+                    relistCounts.remove(o.key());
+                }
             }
         }
     }
@@ -480,12 +490,19 @@ public class BazaarMacro {
 
     // ---- sell ----
 
-    private void pSellAmount(MinecraftClient mc) {
-        // Prefer "Sell Inventory" (sells everything we hold of the item);
-        // fall back to a custom amount equal to what we claimed.
-        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_INV)) { phase = Phase.SELL_PRICE; return; }
-        if (activeAmount > 0 && GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) {
-            requestSign(Integer.toString(activeAmount), Phase.SELL_PRICE);
+    /** Buy price: use the "top order +0.1" preset (exactly our competitive price). */
+    private void pBuyPrice(MinecraftClient mc) {
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_PRICE)) { phase = Phase.BUY_CONFIRM; return; }
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) {
+            requestSign(fmt1(ourBuyPrice), Phase.BUY_CONFIRM);   // fallback: type it
+        }
+    }
+
+    /** Sell price: use the "best offer -0.1" preset. */
+    private void pSellPrice(MinecraftClient mc) {
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_SELL)) { phase = Phase.SELL_CONFIRM; return; }
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) {
+            requestSign(fmt1(ourSellPrice), Phase.SELL_CONFIRM);
         }
     }
 

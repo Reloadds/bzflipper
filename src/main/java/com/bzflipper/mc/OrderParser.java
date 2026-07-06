@@ -29,9 +29,9 @@ public final class OrderParser {
 
     /** One parsed order from the grid. */
     public record ParsedOrder(int slot, boolean buy, String item, double pricePerUnit,
-                              int amount, double filledPct, boolean claimable) {
+                              int amount, int claimAmount, double filledPct, boolean claimable) {
         public String key() { return item.toLowerCase(Locale.ROOT); }
-        public boolean filled() { return claimable || filledPct >= 99.99; }
+        public boolean filled() { return filledPct >= 99.99; }
     }
 
     private static final Pattern NUM = Pattern.compile("([0-9][0-9,]*\\.?[0-9]*)");
@@ -55,7 +55,7 @@ public final class OrderParser {
                     : BazaarStrings.NAME_SELL_PREFIX.length()).trim();
 
             double price = Double.NaN, pct = 0;
-            int amount = 0;
+            int amount = 0, claimAmount = 0;
             boolean claimable = false;
 
             for (String line : GuiHelper.lore(st)) {
@@ -64,6 +64,10 @@ public final class OrderParser {
                 } else if (line.contains(BazaarStrings.LORE_ORDER_AMOUNT)
                         || line.contains(BazaarStrings.LORE_OFFER_AMOUNT)) {
                     amount = (int) firstNum(line, amount);
+                } else if (line.contains(BazaarStrings.LORE_TO_CLAIM)) {
+                    // "you have 1,235 items to claim!"
+                    claimAmount = (int) firstNum(line, claimAmount);
+                    claimable = true;
                 } else if (line.contains(BazaarStrings.LORE_FILLED_LINE)) {
                     Matcher m = PCT.matcher(line);
                     if (m.find()) pct = safe(m.group(1), pct);
@@ -71,7 +75,7 @@ public final class OrderParser {
                 }
                 if (line.contains(BazaarStrings.LORE_CLAIM)) claimable = true;
             }
-            out.add(new ParsedOrder(i, buy, item, price, amount, pct, claimable));
+            out.add(new ParsedOrder(i, buy, item, price, amount, claimAmount, pct, claimable));
         }
         return out;
     }

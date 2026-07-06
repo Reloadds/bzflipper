@@ -35,9 +35,10 @@ public final class BazaarStrings {
     public static final String BTN_CUSTOM_AMOUNT = "custom amount";
     public static final String BTN_CUSTOM_PRICE  = "custom price";
 
-    // Confirmation / "top of book" price buttons
+    // Confirmation / competitive price buttons (real Bazaar wording).
     public static final String BTN_CONFIRM     = "confirm";
-    public static final String BTN_BEST_PRICE  = "+0.1";            // "top order + 0.1"
+    public static final String BTN_BEST_PRICE  = "+0.1";            // buy:  "top order +0.1"
+    public static final String BTN_BEST_SELL   = "-0.1";            // sell: "best offer -0.1"
 
     // On the "Confirm Buy Order" / "Confirm Sell Offer" screen, the submit button
     // is named "Buy Order" / "Sell Offer" with this in its lore ("Click to submit order!").
@@ -47,6 +48,7 @@ public final class BazaarStrings {
     public static final String BTN_MANAGE_ORDERS  = "manage orders";
     public static final String BTN_MANAGE_ALT     = "your bazaar orders"; // alt wording
     public static final String BTN_CLAIM          = "claim";
+    public static final String BTN_CLAIM_COINS    = "claim all coins";
     public static final String BTN_CANCEL_ORDER   = "cancel order";
     public static final String BTN_GO_BACK        = "go back";
 
@@ -66,5 +68,6 @@ public final class BazaarStrings {
     public static final String LORE_OFFER_AMOUNT = "offer amount";
     public static final String LORE_FILLED_LINE  = "filled:";
     public static final String LORE_CLAIM        = "claim";         // "Click to claim!"
+    public static final String LORE_TO_CLAIM     = "items to claim"; // "you have 1,235 items to claim!"
     public static final String LORE_FILLED       = "100%";
 }
