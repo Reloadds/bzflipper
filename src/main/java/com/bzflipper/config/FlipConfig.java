@@ -19,10 +19,13 @@ public class FlipConfig {
 
     // ---- Behaviour tuning ----
     /** Ticks between macro actions. 20 ticks = 1 second. Higher = slower & more human. */
-    public int actionDelayTicks = 12;
+    public int actionDelayTicks = 18;
 
     /** Random extra 0..N ticks added to each delay so timing isn't robotic. */
-    public int actionJitterTicks = 8;
+    public int actionJitterTicks = 12;
+
+    /** Extra pause (ticks) after placing an order before starting the next one. */
+    public int orderCooldownTicks = 40;
 
     /** Bazaar sell tax fraction used in margin math (0.0125 = 1.25%). */
     public double taxFraction = 0.0125;
@@ -47,6 +50,12 @@ public class FlipConfig {
 
     /** Hard cap on units per order (Bazaar's own limit is 71,680). */
     public int maxUnitsPerOrder = 71_680;
+
+    /**
+     * Size each order to at most this fraction of the item's HOURLY volume, so
+     * orders on liquid (high-demand) items are large but still fill quickly.
+     */
+    public double orderVolumeFraction = 0.5;
 
     // ---- Auto flip sourcing (Hypixel Bazaar API) ----
     /** If true, pick the best flips live from the API instead of the fixed targets list. */

@@ -61,6 +61,8 @@ public class BazaarMacro {
     private String activeItem = null;
     private double ourBuyPrice = Double.NaN, ourSellPrice = Double.NaN;
     private int activeAmount = 0;
+    private double activeHourlyVol = Double.MAX_VALUE;  // volume of the item being bought
+    private int buyCooldown = 0;                        // pause between placing orders
     private String pendingSellItem = null;
     private String cancelSide = BazaarStrings.LORE_SIDE_BUY;
     private boolean cancelRelistIsBuy = true;
@@ -135,6 +137,7 @@ public class BazaarMacro {
         if (!enabled || mc.player == null) return;
         if (delayTimer > 0) { delayTimer--; return; }
         resetDelay();
+        if (buyCooldown > 0) buyCooldown--;
 
         purse = PurseReader.readPurse(mc);
         updateTopCandidate();
@@ -202,7 +205,10 @@ public class BazaarMacro {
             return;
         }
 
-        if (buyCount < config.maxOpenOrders) {
+        // Cap and duplicate-skip use our OWN in-memory record of placed orders,
+        // not the grid text (which doesn't match reliably) — this is what stops
+        // it re-buying the same item over and over.
+        if (orders.size() < config.maxOpenOrders && buyCooldown <= 0) {
             String pick = pickNextItem(active);
             if (pick != null) {
                 if (config.dryRun) {
@@ -247,14 +253,19 @@ public class BazaarMacro {
         if (config.useApiFlips) {
             if (Double.isNaN(purse) || spendablePerOrder <= 0) return null;
             for (FlipCandidate c : api.getCandidates()) {
-                if (activeLower.contains(c.displayName.toLowerCase(Locale.ROOT))) continue;
-                if (c.ourBuyPrice() > spendablePerOrder) continue; // can't afford even one unit
+                String key = c.displayName.toLowerCase(Locale.ROOT);
+                if (orders.containsKey(key) || activeLower.contains(key)) continue; // already flipping it
+                if (c.ourBuyPrice() > spendablePerOrder) continue;                   // can't afford even one unit
+                activeHourlyVol = c.minWeeklyVolume() / 168.0;                       // for volume-aware sizing
                 return c.displayName;
             }
             return null;
         }
         for (FlipTarget t : config.targets) {
-            if (!activeLower.contains(t.product.toLowerCase(Locale.ROOT))) return t.product;
+            String key = t.product.toLowerCase(Locale.ROOT);
+            if (orders.containsKey(key) || activeLower.contains(key)) continue;
+            activeHourlyVol = Double.MAX_VALUE; // no volume data for manual targets
+            return t.product;
         }
         return null;
     }
@@ -302,8 +313,14 @@ public class BazaarMacro {
 
     private void pBuyAmount(MinecraftClient mc) {
         double spendable = (purse - config.coinReserve) * config.orderBudgetFraction;
-        activeAmount = PriceMath.affordableUnits(spendable, ourBuyPrice, config.maxUnitsPerOrder);
-        if (activeAmount < 1) { log("insufficient purse for " + activeItem + " — skipping"); phase = Phase.PLAN; return; }
+        int byPurse = PriceMath.affordableUnits(spendable, ourBuyPrice, config.maxUnitsPerOrder);
+        if (byPurse < 1) { log("insufficient purse for " + activeItem + " — skipping"); phase = Phase.PLAN; return; }
+
+        // Cap by demand so big orders only go to liquid items and still fill fast.
+        int byVolume = (activeHourlyVol == Double.MAX_VALUE)
+                ? config.maxUnitsPerOrder
+                : (int) Math.max(1, activeHourlyVol * config.orderVolumeFraction);
+        activeAmount = Math.max(1, Math.min(byPurse, byVolume));
         statusLine = "amount " + activeAmount + " × " + activeItem;
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) {
             requestSign(Integer.toString(activeAmount), Phase.BUY_PRICE);
@@ -318,6 +335,7 @@ public class BazaarMacro {
             oi.buyPrice = ourBuyPrice; oi.amount = activeAmount;
             orders.put(activeItem.toLowerCase(Locale.ROOT), oi);
             ordersPlaced++;
+            buyCooldown = config.orderCooldownTicks;   // pace out orders
             log(String.format(Locale.ROOT, "buy order: %d × %s @ %.1f", activeAmount, activeItem, ourBuyPrice));
             phase = Phase.PLAN;
         }

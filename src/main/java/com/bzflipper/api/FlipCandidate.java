@@ -29,5 +29,14 @@ public class FlipCandidate {
     public double ourBuyPrice()  { return PriceMath.buyOrderPrice(topBuyOrder); }
     public double ourSellPrice() { return PriceMath.sellOfferPrice(lowestSellOffer); }
     public double margin(double tax) { return PriceMath.netMarginFraction(topBuyOrder, lowestSellOffer, tax); }
-    public double score(double tax)  { return PriceMath.flipScore(margin(tax), buyWeekVolume, sellWeekVolume); }
+    public double minWeeklyVolume()  { return Math.min(buyWeekVolume, sellWeekVolume); }
+
+    /**
+     * Expected profit throughput: net coins per unit × liquidity. This ranks by
+     * how much money the flip can actually make per unit time — favoring high
+     * demand AND good margin, which is what we want to prioritize.
+     */
+    public double score(double tax) {
+        return Math.max(0, PriceMath.profitPerUnit(topBuyOrder, lowestSellOffer, tax)) * minWeeklyVolume();
+    }
 }
