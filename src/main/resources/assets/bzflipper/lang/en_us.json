@@ -1,5 +1,6 @@
 {
   "key.categories.bzflipper": "Bazaar Flipper",
   "key.bzflipper.toggle": "Toggle Flipper",
-  "key.bzflipper.panic": "Panic Stop"
+  "key.bzflipper.panic": "Panic Stop",
+  "key.bzflipper.dump": "Dump Bazaar GUI (debug)"
 }

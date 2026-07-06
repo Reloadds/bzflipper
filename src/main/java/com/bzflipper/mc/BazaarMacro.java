@@ -93,7 +93,22 @@ public class BazaarMacro {
         phase = Phase.PLAN;
         stuckTicks = 0;
         resetDelay();
+
+        MinecraftClient mc = MinecraftClient.getInstance();
+        purse = PurseReader.readPurse(mc);
+        var cs = api.getCandidates();
+
         log(config.dryRun ? "started (DRY RUN — plans only, no orders)" : "started (LIVE)");
+        log(String.format(Locale.ROOT, "purse=%s  apiFlips=%b  candidates=%d%s",
+                Double.isNaN(purse) ? "UNKNOWN (are you on SkyBlock?)" : String.format(Locale.ROOT, "%,.0f", purse),
+                config.useApiFlips, cs.size(),
+                api.lastError() != null ? "  §capiError=" + api.lastError() + "§r" : ""));
+        for (int i = 0; i < Math.min(3, cs.size()); i++) {
+            FlipCandidate c = cs.get(i);
+            log(String.format(Locale.ROOT, "  #%d %s  margin %.1f%%  buy %.1f",
+                    i + 1, c.displayName, c.margin(config.taxFraction) * 100, c.ourBuyPrice()));
+        }
+        log("§7now OPEN THE BAZAAR. Press §f]§7 on each Bazaar screen to dump its real button text for tuning.");
     }
 
     public void stop(String why) {

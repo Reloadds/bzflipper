@@ -4,6 +4,7 @@ import com.bzflipper.api.BazaarApi;
 import com.bzflipper.config.FlipConfig;
 import com.bzflipper.hud.Overlay;
 import com.bzflipper.mc.BazaarMacro;
+import com.bzflipper.mc.GuiDump;
 import com.bzflipper.track.ProfitTracker;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -28,6 +29,7 @@ public class BzFlipper implements ClientModInitializer {
 
     private KeyBinding toggleKey;
     private KeyBinding panicKey;
+    private KeyBinding dumpKey;
 
     @Override
     public void onInitializeClient() {
@@ -47,6 +49,10 @@ public class BzFlipper implements ClientModInitializer {
                 "key.bzflipper.panic", InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_END, KeyBinding.Category.MISC));
 
+        dumpKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.bzflipper.dump", InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_RIGHT_BRACKET, KeyBinding.Category.MISC));
+
         ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
         HudRenderCallback.EVENT.register((ctx, tickCounter) -> overlay.render(ctx));
 
@@ -56,6 +62,7 @@ public class BzFlipper implements ClientModInitializer {
     private void onEndTick(MinecraftClient mc) {
         while (toggleKey.wasPressed()) macro.toggle();
         while (panicKey.wasPressed()) macro.stop("panic key");
+        while (dumpKey.wasPressed()) GuiDump.dump(mc);
         macro.onTick(mc);
     }
 }
