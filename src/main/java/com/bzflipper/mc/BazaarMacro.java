@@ -6,26 +6,35 @@ import com.bzflipper.config.FlipConfig;
 import com.bzflipper.config.FlipTarget;
 import com.bzflipper.core.BazaarStrings;
 import com.bzflipper.core.PriceMath;
+import com.bzflipper.mc.OrderParser.ParsedOrder;
 import com.bzflipper.track.ProfitTracker;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.Text;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * v0.4 — purse-aware, multi-slot portfolio flipper.
+ * v0.5 — full-loop portfolio flipper.
  *
- * The Manage-Orders grid is the single source of truth. Each planning pass scans
- * it and takes ONE high-priority action (serialized, since there is one GUI):
- *   claim filled sells → claim filled buys → relist outbid → sell claimed buys →
- *   open a new buy (if under the order cap AND the purse allows it).
+ * Every planning pass parses the Manage Orders grid into structured orders
+ * (side, price, amount, fill %) and takes exactly ONE action, in priority order:
  *
- * Item selection comes from the live Bazaar API (best flips by margin×liquidity);
- * exact prices are read fresh from the product page at order time, and order size
- * is computed from the current purse — so it never over-commits.
+ *   1. CLAIM any filled order (buy → queue its items for selling; sell → profit)
+ *   2. RELIST any order beaten on price — detected by EXACT math: our recorded
+ *      price vs the live top-of-book from the Hypixel API (no tooltip guessing)
+ *   3. SELL queued claimed items (competitive price read fresh at listing time)
+ *   4. BUY the best-ranked flip we don't already hold (ranked by expected
+ *      profit throughput = net profit/unit × liquidity; sized by purse & volume)
+ *
+ * State recovery: orders found in the grid that we don't know about are adopted
+ * (with their price parsed from lore), so a restart mid-flight picks up cleanly.
  */
 public class BazaarMacro {
 
@@ -33,10 +42,14 @@ public class BazaarMacro {
         IDLE, PLAN, NAV_SEARCH, WAIT_SIGN,
         BUY_OPEN, BUY_AMOUNT, BUY_PRICE, BUY_CONFIRM,
         SELL_OPEN, SELL_AMOUNT, SELL_PRICE, SELL_CONFIRM,
-        CLAIM_BUY, CLAIM_SELL, CANCEL
+        CANCEL
     }
 
     private static final int STUCK_LIMIT = 40;
+    /** Ignore price differences below half a tick (float noise). */
+    private static final double EPS = PriceMath.TICK / 2;
+    /** Don't prune an order from memory until it's had time to appear in the grid. */
+    private static final long PRUNE_AGE_MS = 20_000;
 
     private final FlipConfig config;
     private final BazaarApi api;
@@ -45,8 +58,9 @@ public class BazaarMacro {
     private boolean enabled = false;
     private Phase phase = Phase.IDLE;
     private int delayTimer = 0;
-    private int openCooldown = 0;   // throttle for the "/bz" open command
-    private int navCooldown = 0;    // throttle for the "/bz <item>" nav command
+    private int openCooldown = 0;
+    private int navCooldown = 0;
+    private int buyCooldown = 0;
 
     private Phase lastPhase = Phase.IDLE;
     private int stuckTicks = 0;
@@ -61,15 +75,24 @@ public class BazaarMacro {
     private String activeItem = null;
     private double ourBuyPrice = Double.NaN, ourSellPrice = Double.NaN;
     private int activeAmount = 0;
-    private double activeHourlyVol = Double.MAX_VALUE;  // volume of the item being bought
-    private int buyCooldown = 0;                        // pause between placing orders
-    private String pendingSellItem = null;
-    private String cancelSide = BazaarStrings.LORE_SIDE_BUY;
-    private boolean cancelRelistIsBuy = true;
-    private String lastNote = "";   // de-dupes the self-diagnosis chat line
+    private double activeHourlyVol = Double.MAX_VALUE;
 
-    // Per-item economics for accurate profit accounting.
-    private static final class OrderInfo { double buyPrice; int amount; double sellPrice = Double.NaN; }
+    // Cancel context (which side we're cancelling and why).
+    private boolean cancelIsBuy = true;
+    private String cancelItem = null;
+    private int cancelAmount = 0;
+
+    /** Items claimed from filled buy orders, waiting to be listed for sale. */
+    private final Deque<String> pendingSells = new ArrayDeque<>();
+    private final Map<String, Integer> pendingSellAmounts = new HashMap<>();
+
+    /** Our book: what we believe we have open, keyed by lowercase item name. */
+    private static final class OrderInfo {
+        double buyPrice = Double.NaN;
+        double sellPrice = Double.NaN;
+        int amount;
+        long placedAt = System.currentTimeMillis();
+    }
     private final Map<String, OrderInfo> orders = new HashMap<>();
 
     // ---- HUD-exposed ----
@@ -78,7 +101,8 @@ public class BazaarMacro {
     public volatile int buyCount = 0, sellCount = 0;
     public volatile int ordersPlaced = 0, buysFilled = 0, sellsFilled = 0, flipsCompleted = 0;
     public volatile String topCandidate = "—";
-    public volatile double lastTopBuy = Double.NaN, lastLowSell = Double.NaN, lastMargin = Double.NaN;
+    public volatile List<ParsedOrder> lastOrders = List.of();
+    private String lastNote = "";
 
     public BazaarMacro(FlipConfig config, BazaarApi api, ProfitTracker tracker) {
         this.config = config;
@@ -104,25 +128,16 @@ public class BazaarMacro {
         purse = PurseReader.readPurse(mc);
         var cs = api.getCandidates();
 
-        // Debug: show what we read the purse from (visible in logs/latest.log).
-        if (Double.isNaN(purse)) {
-            System.out.println("[bzflipper] purse NOT found. Sidebar lines:");
-            for (String l : ScoreboardReader.sidebarLines(mc)) System.out.println("  | " + l);
-        } else {
-            System.out.println("[bzflipper] purse from line: '" + PurseReader.lastRawLine() + "' -> " + purse);
-        }
-
         log(config.dryRun ? "started (DRY RUN — plans only, no orders)" : "started (LIVE)");
-        log(String.format(Locale.ROOT, "purse=%s  apiFlips=%b  candidates=%d%s",
-                Double.isNaN(purse) ? "UNKNOWN (are you on SkyBlock?)" : String.format(Locale.ROOT, "%,.0f", purse),
-                config.useApiFlips, cs.size(),
-                api.lastError() != null ? "  §capiError=" + api.lastError() + "§r" : ""));
+        log(String.format(Locale.ROOT, "purse=%s  flips=%d  api %ss old%s",
+                Double.isNaN(purse) ? "UNKNOWN" : String.format(Locale.ROOT, "%,.0f", purse),
+                cs.size(), api.ageSeconds(),
+                api.lastError() != null ? "  §cerror=" + api.lastError() + "§r" : ""));
         for (int i = 0; i < Math.min(3, cs.size()); i++) {
             FlipCandidate c = cs.get(i);
-            log(String.format(Locale.ROOT, "  #%d %s  margin %.1f%%  buy %.1f",
+            log(String.format(Locale.ROOT, "  #%d %s  %.1f%%  buy %.1f",
                     i + 1, c.displayName, c.margin(config.taxFraction) * 100, c.ourBuyPrice()));
         }
-        log("§7now OPEN THE BAZAAR. Press §f]§7 on each Bazaar screen to dump its real button text for tuning.");
     }
 
     public void stop(String why) {
@@ -142,18 +157,17 @@ public class BazaarMacro {
         purse = PurseReader.readPurse(mc);
         updateTopCandidate();
 
-        // Sign popups (Custom Amount / Custom Price / Search) aren't chest GUIs.
+        // Sign popups (Custom Amount / Custom Price / search) aren't chest GUIs.
         if (SignFiller.isSignScreen(mc)) {
             if (pendingSignText != null) {
                 SignFiller.fill(mc, pendingSignText);
-                log("sign input: " + pendingSignText);
                 pendingSignText = null;
                 phase = phaseAfterSign;
             }
             return;
         }
         if (GuiHelper.openChest(mc) == null) {
-            openBazaar(mc);   // run /bz ourselves instead of waiting for the user
+            openBazaar(mc);
             return;
         }
 
@@ -162,59 +176,77 @@ public class BazaarMacro {
         switch (phase) {
             case PLAN         -> pPlan(mc);
             case NAV_SEARCH   -> pNavSearch(mc);
-            case WAIT_SIGN    -> statusLine = "opening sign popup…";
+            case WAIT_SIGN    -> statusLine = "waiting for sign…";
             case BUY_OPEN     -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BUY_ORDER)) phase = Phase.BUY_AMOUNT; }
             case BUY_AMOUNT   -> pBuyAmount(mc);
             case BUY_PRICE    -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) requestSign(fmt1(ourBuyPrice), Phase.BUY_CONFIRM); }
             case BUY_CONFIRM  -> pBuyConfirm(mc);
             case SELL_OPEN    -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_OFFER)) phase = Phase.SELL_AMOUNT; }
-            case SELL_AMOUNT  -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_INV)) phase = Phase.SELL_PRICE; }
+            case SELL_AMOUNT  -> pSellAmount(mc);
             case SELL_PRICE   -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) requestSign(fmt1(ourSellPrice), Phase.SELL_CONFIRM); }
             case SELL_CONFIRM -> pSellConfirm(mc);
-            case CLAIM_BUY    -> pClaimBuy(mc);
-            case CLAIM_SELL   -> pClaimSell(mc);
             case CANCEL       -> pCancel(mc);
             case IDLE         -> { }
         }
     }
 
-    // ---- planning ----
+    // ---- planning: parse grid, take highest-priority action ----
 
     private void pPlan(MinecraftClient mc) {
         if (!goToManage(mc)) { statusLine = "→ manage orders"; return; }
 
-        Set<String> active = GuiHelper.collectNames(mc);
-        buyCount = GuiHelper.countSlotsWithLore(mc, BazaarStrings.LORE_SIDE_BUY);
-        sellCount = GuiHelper.countSlotsWithLore(mc, BazaarStrings.LORE_SIDE_SELL);
+        List<ParsedOrder> grid = OrderParser.parse(mc);
+        lastOrders = grid;
+        buyCount = (int) grid.stream().filter(ParsedOrder::buy).count();
+        sellCount = grid.size() - buyCount;
 
-        int s = filledSlot(mc, BazaarStrings.LORE_SIDE_SELL);
-        if (s >= 0) { activeItem = GuiHelper.itemNameAt(mc, s); phase = Phase.CLAIM_SELL; return; }
+        adoptAndPrune(grid);
 
-        int b = filledSlot(mc, BazaarStrings.LORE_SIDE_BUY);
-        if (b >= 0) { activeItem = GuiHelper.itemNameAt(mc, b); phase = Phase.CLAIM_BUY; return; }
+        // 1) Claim any filled order (clicking a claimable order claims it).
+        for (ParsedOrder o : grid) {
+            if (!o.filled()) continue;
+            statusLine = "claiming " + (o.buy() ? "bought " : "sold ") + o.item();
+            if (GuiHelper.clickSlotIndex(mc, o.slot())) {
+                if (o.buy()) onBuyClaimed(o);
+                else onSellClaimed(o);
+            }
+            return; // one action per pass
+        }
 
-        int ob = GuiHelper.firstSlotWithLore(mc, BazaarStrings.LORE_OUTBID, BazaarStrings.LORE_SIDE_BUY);
-        if (ob >= 0) { activeItem = GuiHelper.itemNameAt(mc, ob); cancelSide = BazaarStrings.LORE_SIDE_BUY; cancelRelistIsBuy = true; phase = Phase.CANCEL; return; }
-
-        int os = GuiHelper.firstSlotWithLore(mc, BazaarStrings.LORE_OUTBID, BazaarStrings.LORE_SIDE_SELL);
-        if (os >= 0) { activeItem = GuiHelper.itemNameAt(mc, os); cancelSide = BazaarStrings.LORE_SIDE_SELL; cancelRelistIsBuy = false; phase = Phase.CANCEL; return; }
-
-        if (pendingSellItem != null) {
-            activeItem = pendingSellItem;
-            startNav(pendingSellItem, Phase.SELL_OPEN);
+        // 2) Relist anything beaten on price — exact math vs live top-of-book.
+        for (ParsedOrder o : grid) {
+            if (o.filled()) continue;
+            FlipCandidate q = api.quote(o.key());
+            if (q == null || Double.isNaN(o.pricePerUnit())) continue;
+            boolean beaten = o.buy()
+                    ? q.topBuyOrder > o.pricePerUnit() + EPS       // someone bids higher than us
+                    : q.lowestSellOffer < o.pricePerUnit() - EPS;  // someone offers lower than us
+            if (!beaten) continue;
+            if (config.dryRun) { note("DRY: would relist " + o.item()); continue; }
+            statusLine = "beaten on " + o.item() + " — cancelling";
+            cancelIsBuy = o.buy();
+            cancelItem = o.item();
+            cancelAmount = o.amount();
+            if (GuiHelper.clickSlotIndex(mc, o.slot())) phase = Phase.CANCEL;
             return;
         }
 
-        // Cap and duplicate-skip use our OWN in-memory record of placed orders,
-        // not the grid text (which doesn't match reliably) — this is what stops
-        // it re-buying the same item over and over.
+        // 3) Sell claimed goods.
+        if (!pendingSells.isEmpty()) {
+            String item = pendingSells.peekFirst();
+            activeItem = item;
+            activeAmount = pendingSellAmounts.getOrDefault(item.toLowerCase(Locale.ROOT), 0);
+            startNav(item, Phase.SELL_OPEN);
+            return;
+        }
+
+        // 4) Open a new buy order with the best-ranked flip we don't hold.
         if (orders.size() < config.maxOpenOrders && buyCooldown <= 0) {
-            String pick = pickNextItem(active);
+            String pick = pickNextItem(grid);
             if (pick != null) {
                 if (config.dryRun) {
                     statusLine = "DRY: would buy " + pick;
-                    note("§eDRY RUN§r is on — would buy §f" + pick
-                            + "§r. Set §fdryRun:false§r in config/bzflipper.json to actually trade.");
+                    note("§eDRY RUN§r — would buy §f" + pick + "§r (set dryRun:false to trade)");
                     return;
                 }
                 activeItem = pick;
@@ -222,50 +254,94 @@ public class BazaarMacro {
                 return;
             }
         }
-        String reason = diagnoseIdle();
-        statusLine = reason;
-        note(reason);
+        statusLine = String.format(Locale.ROOT, "monitoring %dB/%dS — %s",
+                buyCount, sellCount, idleReason());
     }
 
-    /** Explains, in one line, why the flipper isn't opening any orders right now. */
-    private String diagnoseIdle() {
-        var cs = api.getCandidates();
-        if (Double.isNaN(purse)) return "idle: purse UNKNOWN — sidebar not read (are you on SkyBlock?)";
-        if (cs.isEmpty()) return "idle: 0 flips from API"
-                + (api.lastError() != null ? " (error: " + api.lastError() + ")" : " (still loading — wait ~1 min)");
+    /** Adopt unknown grid orders (restart recovery) and prune vanished ones. */
+    private void adoptAndPrune(List<ParsedOrder> grid) {
+        Set<String> seen = new HashSet<>();
+        for (ParsedOrder o : grid) {
+            seen.add(o.key());
+            OrderInfo oi = orders.get(o.key());
+            if (oi == null) {
+                oi = new OrderInfo();
+                oi.amount = o.amount();
+                if (o.buy()) oi.buyPrice = o.pricePerUnit(); else oi.sellPrice = o.pricePerUnit();
+                orders.put(o.key(), oi);
+            } else if (!o.buy() && Double.isNaN(oi.sellPrice)) {
+                oi.sellPrice = o.pricePerUnit();
+            }
+        }
+        long now = System.currentTimeMillis();
+        orders.entrySet().removeIf(e -> {
+            if (seen.contains(e.getKey())) return false;
+            if (pendingSells.stream().anyMatch(s -> s.toLowerCase(Locale.ROOT).equals(e.getKey()))) return false;
+            if (activeItem != null && activeItem.toLowerCase(Locale.ROOT).equals(e.getKey())) return false;
+            return now - e.getValue().placedAt > PRUNE_AGE_MS;
+        });
+    }
+
+    private void onBuyClaimed(ParsedOrder o) {
+        buysFilled++;
+        pendingSells.addLast(o.item());
+        pendingSellAmounts.put(o.key(), o.amount());
+        OrderInfo oi = orders.get(o.key());
+        if (oi != null && Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
+        log("claimed " + o.amount() + "× " + o.item() + " — will list for sale");
+    }
+
+    private void onSellClaimed(ParsedOrder o) {
+        sellsFilled++;
+        flipsCompleted++;
+        OrderInfo oi = orders.remove(o.key());
+        double sellP = oi != null && !Double.isNaN(oi.sellPrice) ? oi.sellPrice : o.pricePerUnit();
+        double buyP = oi != null ? oi.buyPrice : Double.NaN;
+        int amt = oi != null && oi.amount > 0 ? oi.amount : o.amount();
+        if (!Double.isNaN(buyP) && !Double.isNaN(sellP)) {
+            double profit = (sellP * (1.0 - config.taxFraction) - buyP) * amt;
+            tracker.addProfit(profit);
+            log(String.format(Locale.ROOT, "§aflip done§r: %s  %+,.0f coins  (session %,.0f)",
+                    o.item(), profit, tracker.total()));
+        } else {
+            log("claimed sold " + o.item() + " (buy price unknown — profit not tracked)");
+        }
+    }
+
+    /** Why no new order is being opened right now (for the HUD/status). */
+    private String idleReason() {
+        if (orders.size() >= config.maxOpenOrders) return "at order cap";
+        if (buyCooldown > 0) return "pacing";
+        if (api.getCandidates().isEmpty()) return "no flips from API yet";
+        if (Double.isNaN(purse)) return "purse unknown";
         double spend = (purse - config.coinReserve) * config.orderBudgetFraction;
-        if (spend <= 0) return String.format(Locale.ROOT,
-                "idle: nothing spendable (purse %,.0f − reserve %,.0f)", purse, config.coinReserve);
-        return String.format(Locale.ROOT,
-                "idle: %d flips found but none affordable/free right now (per-order budget %,.0f)", cs.size(), spend);
+        if (spend <= 0) return "nothing spendable";
+        return "no new pick";
     }
 
-    /** First filled order on the given side (checks both "100%" and "filled!" wording). */
-    private int filledSlot(MinecraftClient mc, String side) {
-        int i = GuiHelper.firstSlotWithLore(mc, BazaarStrings.LORE_FILLED, side);
-        if (i >= 0) return i;
-        return GuiHelper.firstSlotWithLore(mc, BazaarStrings.LORE_FILLED_ALT, side);
-    }
-
-    /** Choose the next item to buy: best affordable, not-already-active flip. */
-    private String pickNextItem(Set<String> activeLower) {
+    /** Best-ranked candidate we don't already hold, hold pending, or see in the grid. */
+    private String pickNextItem(List<ParsedOrder> grid) {
         double spendablePerOrder = (purse - config.coinReserve) * config.orderBudgetFraction;
+        Set<String> held = new HashSet<>(orders.keySet());
+        for (ParsedOrder o : grid) held.add(o.key());
+        for (String s : pendingSells) held.add(s.toLowerCase(Locale.ROOT));
+
         if (config.useApiFlips) {
             if (Double.isNaN(purse) || spendablePerOrder <= 0) return null;
             for (FlipCandidate c : api.getCandidates()) {
                 String key = c.displayName.toLowerCase(Locale.ROOT);
-                if (orders.containsKey(key) || activeLower.contains(key)) continue; // already flipping it
-                if (c.ourBuyPrice() > spendablePerOrder) continue;                   // can't afford even one unit
-                activeHourlyVol = c.minWeeklyVolume() / 168.0;                       // for volume-aware sizing
+                if (held.contains(key)) continue;
+                if (c.ourBuyPrice() > spendablePerOrder) continue;
+                activeHourlyVol = c.minWeeklyVolume() / 168.0;
                 return c.displayName;
             }
             return null;
         }
         for (FlipTarget t : config.targets) {
-            String key = t.product.toLowerCase(Locale.ROOT);
-            if (orders.containsKey(key) || activeLower.contains(key)) continue;
-            activeHourlyVol = Double.MAX_VALUE; // no volume data for manual targets
-            return t.product;
+            if (!held.contains(t.product.toLowerCase(Locale.ROOT))) {
+                activeHourlyVol = Double.MAX_VALUE;
+                return t.product;
+            }
         }
         return null;
     }
@@ -280,17 +356,18 @@ public class BazaarMacro {
             if (!Double.isNaN(topBuy) && !Double.isNaN(lowSell)) {
                 ourBuyPrice = PriceMath.buyOrderPrice(topBuy);
                 ourSellPrice = PriceMath.sellOfferPrice(lowSell);
-                lastTopBuy = topBuy; lastLowSell = lowSell;
-                lastMargin = PriceMath.netMarginFraction(topBuy, lowSell, config.taxFraction);
+            } else {
+                // Fall back to API top-of-book if the page lore doesn't parse.
+                FlipCandidate q = api.quote(navItem.toLowerCase(Locale.ROOT));
+                if (q != null) { ourBuyPrice = q.ourBuyPrice(); ourSellPrice = q.ourSellPrice(); }
             }
             phase = navAfter;
             return;
         }
         if (GuiHelper.hasItemNamed(mc, navItem) && !atProduct(mc)) {
-            GuiHelper.clickByName(mc, navItem);         // exact item shown in a results list
+            GuiHelper.clickByName(mc, navItem);
             return;
         }
-        // Jump straight to the item with the Bazaar command (more reliable than the search GUI).
         if (navCooldown > 0) { navCooldown--; return; }
         var nh = mc.getNetworkHandler();
         if (nh != null) nh.sendChatCommand("bz " + navItem);
@@ -301,7 +378,6 @@ public class BazaarMacro {
         navItem = item; navAfter = after; navCooldown = 0; phase = Phase.NAV_SEARCH;
     }
 
-    /** Open the Bazaar by running /bz (throttled so we don't spam the command). */
     private void openBazaar(MinecraftClient mc) {
         if (openCooldown > 0) { openCooldown--; statusLine = "opening Bazaar…"; return; }
         var nh = mc.getNetworkHandler();
@@ -315,8 +391,6 @@ public class BazaarMacro {
         double spendable = (purse - config.coinReserve) * config.orderBudgetFraction;
         int byPurse = PriceMath.affordableUnits(spendable, ourBuyPrice, config.maxUnitsPerOrder);
         if (byPurse < 1) { log("insufficient purse for " + activeItem + " — skipping"); phase = Phase.PLAN; return; }
-
-        // Cap by demand so big orders only go to liquid items and still fill fast.
         int byVolume = (activeHourlyVol == Double.MAX_VALUE)
                 ? config.maxUnitsPerOrder
                 : (int) Math.max(1, activeHourlyVol * config.orderVolumeFraction);
@@ -332,84 +406,66 @@ public class BazaarMacro {
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_BUY)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CONFIRM)) {
             OrderInfo oi = new OrderInfo();
-            oi.buyPrice = ourBuyPrice; oi.amount = activeAmount;
+            oi.buyPrice = ourBuyPrice;
+            oi.amount = activeAmount;
             orders.put(activeItem.toLowerCase(Locale.ROOT), oi);
             ordersPlaced++;
-            buyCooldown = config.orderCooldownTicks;   // pace out orders
-            log(String.format(Locale.ROOT, "buy order: %d × %s @ %.1f", activeAmount, activeItem, ourBuyPrice));
+            buyCooldown = config.orderCooldownTicks;
+            log(String.format(Locale.ROOT, "§abuy§r %d× %s @ %.1f  (%,.0f coins)",
+                    activeAmount, activeItem, ourBuyPrice, activeAmount * ourBuyPrice));
+            activeItem = null;
             phase = Phase.PLAN;
         }
     }
 
     // ---- sell ----
 
+    private void pSellAmount(MinecraftClient mc) {
+        // Prefer "Sell Inventory" (sells everything we hold of the item);
+        // fall back to a custom amount equal to what we claimed.
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_INV)) { phase = Phase.SELL_PRICE; return; }
+        if (activeAmount > 0 && GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) {
+            requestSign(Integer.toString(activeAmount), Phase.SELL_PRICE);
+        }
+    }
+
     private void pSellConfirm(MinecraftClient mc) {
         if (GuiHelper.clickByNameAndLore(mc, BazaarStrings.BTN_SELL_OFFER, BazaarStrings.LORE_SUBMIT)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_SELL)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CONFIRM)) {
-            OrderInfo oi = orders.get(activeItem.toLowerCase(Locale.ROOT));
-            if (oi != null) oi.sellPrice = ourSellPrice;
+            String key = activeItem.toLowerCase(Locale.ROOT);
+            OrderInfo oi = orders.computeIfAbsent(key, k -> new OrderInfo());
+            oi.sellPrice = ourSellPrice;
+            if (oi.amount <= 0) oi.amount = activeAmount;
             ordersPlaced++;
-            log(String.format(Locale.ROOT, "sell offer: %s @ %.1f", activeItem, ourSellPrice));
-            pendingSellItem = null;
+            pendingSells.removeFirstOccurrence(activeItem);
+            pendingSellAmounts.remove(key);
+            log(String.format(Locale.ROOT, "§6sell§r %s @ %.1f", activeItem, ourSellPrice));
+            activeItem = null;
             phase = Phase.PLAN;
         }
     }
 
-    // ---- claim / cancel ----
-
-    private void pClaimBuy(MinecraftClient mc) {
-        if (!goToManage(mc)) return;
-        int b = filledSlot(mc, BazaarStrings.LORE_SIDE_BUY);
-        if (b >= 0) {
-            String item = GuiHelper.itemNameAt(mc, b);
-            if (GuiHelper.clickSlotIndex(mc, b)) {
-                buysFilled++; pendingSellItem = item;
-                log("claimed bought: " + item);
-                phase = Phase.PLAN;
-            }
-        } else phase = Phase.PLAN;
-    }
-
-    private void pClaimSell(MinecraftClient mc) {
-        if (!goToManage(mc)) return;
-        int s = filledSlot(mc, BazaarStrings.LORE_SIDE_SELL);
-        if (s >= 0) {
-            String item = GuiHelper.itemNameAt(mc, s);
-            if (GuiHelper.clickSlotIndex(mc, s)) {
-                sellsFilled++; flipsCompleted++;
-                OrderInfo oi = orders.remove(item.toLowerCase(Locale.ROOT));
-                if (oi != null && !Double.isNaN(oi.sellPrice)) {
-                    double profit = (oi.sellPrice * (1.0 - config.taxFraction) - oi.buyPrice) * oi.amount;
-                    tracker.addProfit(profit);
-                    log(String.format(Locale.ROOT, "flip done: %s ~%,.0f (total ~%,.0f)",
-                            item, profit, tracker.total()));
-                } else {
-                    log("claimed sell: " + item + " (profit unknown — not tracked)");
-                }
-                phase = Phase.PLAN;
-            }
-        } else phase = Phase.PLAN;
-    }
+    // ---- cancel/relist (order options screen is open at this point) ----
 
     private void pCancel(MinecraftClient mc) {
-        if (!goToManage(mc)) return;
-        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CANCEL_ORDER)) {
-            afterCancel();
-            return;
+        statusLine = "cancelling " + cancelItem;
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CANCEL_ORDER)
+                || GuiHelper.clickByName(mc, "cancel")) {
+            log("relisting " + cancelItem);
+            if (cancelIsBuy) {
+                activeItem = cancelItem;
+                startNav(cancelItem, Phase.BUY_OPEN);
+            } else {
+                // Unsold units come back to the inventory — list them again.
+                pendingSells.addLast(cancelItem);
+                pendingSellAmounts.put(cancelItem.toLowerCase(Locale.ROOT), cancelAmount);
+                phase = Phase.PLAN;
+            }
         }
-        int slot = GuiHelper.firstSlotWithLore(mc, BazaarStrings.LORE_OUTBID, cancelSide);
-        if (slot >= 0) GuiHelper.clickSlotIndex(mc, slot); // open the order so Cancel appears
-        else afterCancel();                                 // already gone
     }
 
-    private void afterCancel() {
-        log("relisting " + activeItem);
-        if (cancelRelistIsBuy) { startNav(activeItem, Phase.BUY_OPEN); }
-        else { pendingSellItem = activeItem; phase = Phase.PLAN; }
-    }
-
-    // ---- navigation predicates ----
+    // ---- screen predicates ----
 
     private boolean atProduct(MinecraftClient mc) {
         return GuiHelper.hasItemNamed(mc, BazaarStrings.BTN_BUY_ORDER)
@@ -417,8 +473,7 @@ public class BazaarMacro {
     }
 
     private boolean atManage(MinecraftClient mc) {
-        String t = GuiHelper.screenTitle(mc);
-        return t.contains("your bazaar orders") || (t.contains("order") && !atProduct(mc));
+        return GuiHelper.screenTitle(mc).contains(BazaarStrings.TITLE_MANAGE);
     }
 
     private boolean atMain(MinecraftClient mc) {
@@ -465,10 +520,12 @@ public class BazaarMacro {
             if (++stuckTicks > STUCK_LIMIT) {
                 log("stuck in " + phase + " — recovering");
                 GuiHelper.clickByName(MinecraftClient.getInstance(), BazaarStrings.BTN_GO_BACK);
-                phase = Phase.PLAN; stuckTicks = 0;
+                phase = Phase.PLAN;
+                stuckTicks = 0;
             }
         } else {
-            stuckTicks = 0; lastPhase = phase;
+            stuckTicks = 0;
+            lastPhase = phase;
         }
     }
 
@@ -489,10 +546,9 @@ public class BazaarMacro {
     private void log(String msg) {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player != null) mc.player.sendMessage(Text.literal("§b[BZ] §r" + msg), false);
-        System.out.println("[bzflipper] " + msg);
+        System.out.println("[bzflipper] " + msg.replaceAll("§.", ""));
     }
 
-    /** Log to chat only when the message changes, so repeated idle states don't spam. */
     private void note(String msg) {
         if (msg.equals(lastNote)) return;
         lastNote = msg;

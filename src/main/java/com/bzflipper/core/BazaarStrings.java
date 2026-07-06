@@ -52,15 +52,19 @@ public final class BazaarStrings {
 
     // --- Lore parsing anchors ---
     public static final String LORE_COINS        = "coins";
-    public static final String LORE_TOP_BUY      = "buy price";     // fragment on product lore
-    public static final String LORE_TOP_SELL     = "sell price";
 
-    // Distinguish which side an order in the "Manage Orders" grid belongs to.
-    public static final String LORE_SIDE_BUY     = "buy order";
-    public static final String LORE_SIDE_SELL    = "sell offer";
+    // Manage Orders screen ("Your Bazaar Orders" / "Co-op Bazaar Orders").
+    public static final String TITLE_MANAGE      = "bazaar orders";
 
-    // Order status detection (from an order's lore on the Manage screen).
-    public static final String LORE_FILLED       = "100%";          // fully filled
-    public static final String LORE_FILLED_ALT   = "filled!";
-    public static final String LORE_OUTBID       = "outbid";        // someone beat our price
+    // Grid entries are named "BUY <Item>" / "SELL <Item>".
+    public static final String NAME_BUY_PREFIX   = "buy ";
+    public static final String NAME_SELL_PREFIX  = "sell ";
+
+    // Lore lines on each order in the grid.
+    public static final String LORE_PRICE_UNIT   = "price per unit";
+    public static final String LORE_ORDER_AMOUNT = "order amount";
+    public static final String LORE_OFFER_AMOUNT = "offer amount";
+    public static final String LORE_FILLED_LINE  = "filled:";
+    public static final String LORE_CLAIM        = "claim";         // "Click to claim!"
+    public static final String LORE_FILLED       = "100%";
 }

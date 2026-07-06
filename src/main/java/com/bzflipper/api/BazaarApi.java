@@ -42,6 +42,8 @@ public class BazaarApi {
             .connectTimeout(Duration.ofSeconds(10)).build();
 
     private volatile List<FlipCandidate> candidates = List.of();
+    /** Live top-of-book for EVERY bazaar item, keyed by lowercase display name. */
+    private volatile Map<String, FlipCandidate> quotes = Map.of();
     private volatile long lastUpdatedMillis = 0;
     private volatile String lastError = null;
 
@@ -70,6 +72,14 @@ public class BazaarApi {
     public long lastUpdatedMillis() { return lastUpdatedMillis; }
     public String lastError() { return lastError; }
 
+    /** Live quote for an item by (lowercase) display name, or null. */
+    public FlipCandidate quote(String nameLower) { return quotes.get(nameLower); }
+
+    /** Seconds since the last successful API refresh, or -1 if never. */
+    public long ageSeconds() {
+        return lastUpdatedMillis == 0 ? -1 : (System.currentTimeMillis() - lastUpdatedMillis) / 1000;
+    }
+
     private void refreshSafe() {
         try { refresh(); lastError = null; }
         catch (Exception e) {
@@ -93,6 +103,7 @@ public class BazaarApi {
         ensureItemNames();
         JsonObject products = root.getAsJsonObject("products");
         List<FlipCandidate> list = new ArrayList<>();
+        Map<String, FlipCandidate> quoteMap = new java.util.HashMap<>();
 
         for (Map.Entry<String, com.google.gson.JsonElement> e : products.entrySet()) {
             JsonObject p = e.getValue().getAsJsonObject();
@@ -110,18 +121,24 @@ public class BazaarApi {
             double buyMW = q.get("buyMovingWeek").getAsDouble();
             double sellMW = q.get("sellMovingWeek").getAsDouble();
 
+            FlipCandidate c = new FlipCandidate(e.getKey(), ItemNames.name(e.getKey()),
+                    topBuyOrder, lowestSellOffer, buyMW, sellMW);
+            // Every item goes into the quote map (used for exact undercut checks
+            // on orders we hold), regardless of the flip filters below.
+            quoteMap.put(c.displayName.toLowerCase(Locale.ROOT), c);
+
             double margin = PriceMath.netMarginFraction(topBuyOrder, lowestSellOffer, config.taxFraction);
             // Skip thin spreads AND absurd ones (huge margins are illiquid/manipulation traps).
             if (margin < config.apiMinMargin || margin > config.apiMaxMargin) continue;
             if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
             if (config.apiMaxUnitPrice > 0 && topBuyOrder > config.apiMaxUnitPrice) continue;
 
-            list.add(new FlipCandidate(e.getKey(), ItemNames.name(e.getKey()),
-                    topBuyOrder, lowestSellOffer, buyMW, sellMW));
+            list.add(c);
         }
 
         list.sort((a, b) -> Double.compare(b.score(config.taxFraction), a.score(config.taxFraction)));
         candidates = List.copyOf(list.subList(0, Math.min(list.size(), 30)));
+        quotes = Map.copyOf(quoteMap);
         lastUpdatedMillis = System.currentTimeMillis();
     }
 
