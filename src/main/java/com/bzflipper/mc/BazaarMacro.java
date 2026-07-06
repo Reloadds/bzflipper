@@ -311,7 +311,8 @@ public class BazaarMacro {
     }
 
     private void pBuyConfirm(MinecraftClient mc) {
-        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_BUY)
+        if (GuiHelper.clickByNameAndLore(mc, BazaarStrings.BTN_BUY_ORDER, BazaarStrings.LORE_SUBMIT)
+                || GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_BUY)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CONFIRM)) {
             OrderInfo oi = new OrderInfo();
             oi.buyPrice = ourBuyPrice; oi.amount = activeAmount;
@@ -325,7 +326,8 @@ public class BazaarMacro {
     // ---- sell ----
 
     private void pSellConfirm(MinecraftClient mc) {
-        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_SELL)
+        if (GuiHelper.clickByNameAndLore(mc, BazaarStrings.BTN_SELL_OFFER, BazaarStrings.LORE_SUBMIT)
+                || GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_SELL)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CONFIRM)) {
             OrderInfo oi = orders.get(activeItem.toLowerCase(Locale.ROOT));
             if (oi != null) oi.sellPrice = ourSellPrice;

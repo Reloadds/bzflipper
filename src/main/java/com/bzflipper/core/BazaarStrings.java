@@ -39,6 +39,10 @@ public final class BazaarStrings {
     public static final String BTN_CONFIRM     = "confirm";
     public static final String BTN_BEST_PRICE  = "+0.1";            // "top order + 0.1"
 
+    // On the "Confirm Buy Order" / "Confirm Sell Offer" screen, the submit button
+    // is named "Buy Order" / "Sell Offer" with this in its lore ("Click to submit order!").
+    public static final String LORE_SUBMIT     = "submit";
+
     // Manage screen
     public static final String BTN_MANAGE_ORDERS  = "manage orders";
     public static final String BTN_MANAGE_ALT     = "your bazaar orders"; // alt wording
