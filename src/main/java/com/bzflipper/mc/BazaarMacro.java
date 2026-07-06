@@ -45,6 +45,8 @@ public class BazaarMacro {
     private boolean enabled = false;
     private Phase phase = Phase.IDLE;
     private int delayTimer = 0;
+    private int openCooldown = 0;   // throttle for the "/bz" open command
+    private int navCooldown = 0;    // throttle for the "/bz <item>" nav command
 
     private Phase lastPhase = Phase.IDLE;
     private int stuckTicks = 0;
@@ -92,6 +94,7 @@ public class BazaarMacro {
         enabled = true;
         phase = Phase.PLAN;
         stuckTicks = 0;
+        openCooldown = 0;
         resetDelay();
 
         MinecraftClient mc = MinecraftClient.getInstance();
@@ -138,7 +141,7 @@ public class BazaarMacro {
             return;
         }
         if (GuiHelper.openChest(mc) == null) {
-            statusLine = "waiting: open the Bazaar";
+            openBazaar(mc);   // run /bz ourselves instead of waiting for the user
             return;
         }
 
@@ -186,7 +189,7 @@ public class BazaarMacro {
 
         if (pendingSellItem != null) {
             activeItem = pendingSellItem;
-            navItem = pendingSellItem; navAfter = Phase.SELL_OPEN; phase = Phase.NAV_SEARCH;
+            startNav(pendingSellItem, Phase.SELL_OPEN);
             return;
         }
 
@@ -194,7 +197,8 @@ public class BazaarMacro {
             String pick = pickNextItem(active);
             if (pick != null) {
                 if (config.dryRun) { statusLine = "DRY: would buy " + pick; return; }
-                activeItem = pick; navItem = pick; navAfter = Phase.BUY_OPEN; phase = Phase.NAV_SEARCH;
+                activeItem = pick;
+                startNav(pick, Phase.BUY_OPEN);
                 return;
             }
         }
@@ -243,14 +247,26 @@ public class BazaarMacro {
             return;
         }
         if (GuiHelper.hasItemNamed(mc, navItem) && !atProduct(mc)) {
-            GuiHelper.clickByName(mc, navItem);         // search results list
-        } else if (atMain(mc)) {
-            if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SEARCH)) {
-                requestSign(navItem, Phase.NAV_SEARCH); // type the item name into the search sign
-            }
-        } else {
-            GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK);
+            GuiHelper.clickByName(mc, navItem);         // exact item shown in a results list
+            return;
         }
+        // Jump straight to the item with the Bazaar command (more reliable than the search GUI).
+        if (navCooldown > 0) { navCooldown--; return; }
+        var nh = mc.getNetworkHandler();
+        if (nh != null) nh.sendChatCommand("bz " + navItem);
+        navCooldown = 6;
+    }
+
+    private void startNav(String item, Phase after) {
+        navItem = item; navAfter = after; navCooldown = 0; phase = Phase.NAV_SEARCH;
+    }
+
+    /** Open the Bazaar by running /bz (throttled so we don't spam the command). */
+    private void openBazaar(MinecraftClient mc) {
+        if (openCooldown > 0) { openCooldown--; statusLine = "opening Bazaar…"; return; }
+        var nh = mc.getNetworkHandler();
+        if (nh != null) { nh.sendChatCommand("bz"); statusLine = "opening Bazaar (/bz)"; }
+        openCooldown = 6;
     }
 
     // ---- buy ----
@@ -340,7 +356,7 @@ public class BazaarMacro {
 
     private void afterCancel() {
         log("relisting " + activeItem);
-        if (cancelRelistIsBuy) { navItem = activeItem; navAfter = Phase.BUY_OPEN; phase = Phase.NAV_SEARCH; }
+        if (cancelRelistIsBuy) { startNav(activeItem, Phase.BUY_OPEN); }
         else { pendingSellItem = activeItem; phase = Phase.PLAN; }
     }
 
