@@ -130,6 +130,7 @@ public class BazaarMacro {
         openCooldown = 0;
         resetDelay();
 
+        GuiDump.reset();
         MinecraftClient mc = MinecraftClient.getInstance();
         purse = PurseReader.readPurse(mc);
         var cs = api.getCandidates();
@@ -177,6 +178,7 @@ public class BazaarMacro {
             return;
         }
 
+        GuiDump.autoDump(mc);   // capture each new Bazaar screen for string tuning
         checkStuck();
 
         switch (phase) {
