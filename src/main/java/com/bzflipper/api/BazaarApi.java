@@ -95,25 +95,28 @@ public class BazaarApi {
 
         for (Map.Entry<String, com.google.gson.JsonElement> e : products.entrySet()) {
             JsonObject p = e.getValue().getAsJsonObject();
-            JsonArray buys = p.getAsJsonArray("buy_summary");
-            JsonArray sells = p.getAsJsonArray("sell_summary");
-            if (buys == null || sells == null || buys.isEmpty() || sells.isEmpty()) continue;
+            // Hypixel's naming is INVERTED: buy_summary holds the SELL offers,
+            // sell_summary holds the BUY orders. Use them accordingly.
+            JsonArray sellOffers = p.getAsJsonArray("buy_summary");
+            JsonArray buyOrders  = p.getAsJsonArray("sell_summary");
+            if (sellOffers == null || buyOrders == null || sellOffers.isEmpty() || buyOrders.isEmpty()) continue;
 
-            double topBuy = buys.get(0).getAsJsonObject().get("pricePerUnit").getAsDouble();
-            double lowSell = sells.get(0).getAsJsonObject().get("pricePerUnit").getAsDouble();
-            if (topBuy <= 0 || lowSell <= 0) continue;
+            double topBuyOrder     = buyOrders.get(0).getAsJsonObject().get("pricePerUnit").getAsDouble();   // we outbid this
+            double lowestSellOffer = sellOffers.get(0).getAsJsonObject().get("pricePerUnit").getAsDouble();  // we undercut this
+            if (topBuyOrder <= 0 || lowestSellOffer <= 0) continue;
 
             JsonObject q = p.getAsJsonObject("quick_status");
             double buyMW = q.get("buyMovingWeek").getAsDouble();
             double sellMW = q.get("sellMovingWeek").getAsDouble();
 
-            double margin = PriceMath.netMarginFraction(topBuy, lowSell, config.taxFraction);
-            if (margin < config.apiMinMargin) continue;
+            double margin = PriceMath.netMarginFraction(topBuyOrder, lowestSellOffer, config.taxFraction);
+            // Skip thin spreads AND absurd ones (huge margins are illiquid/manipulation traps).
+            if (margin < config.apiMinMargin || margin > config.apiMaxMargin) continue;
             if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
-            if (config.apiMaxUnitPrice > 0 && topBuy > config.apiMaxUnitPrice) continue;
+            if (config.apiMaxUnitPrice > 0 && topBuyOrder > config.apiMaxUnitPrice) continue;
 
             list.add(new FlipCandidate(e.getKey(), displayName(e.getKey()),
-                    topBuy, lowSell, buyMW, sellMW));
+                    topBuyOrder, lowestSellOffer, buyMW, sellMW));
         }
 
         list.sort((a, b) -> Double.compare(b.score(config.taxFraction), a.score(config.taxFraction)));

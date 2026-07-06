@@ -7,33 +7,41 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Extracts the player's purse (coins) from the SkyBlock sidebar so the flipper
- * never commits more than it can afford. Returns NaN if it can't be found (e.g.
- * not on SkyBlock, or the line wording changed).
+ * Extracts the player's purse (coins) from the SkyBlock sidebar.
+ *
+ * Robust against stray formatting/characters inside the number (which was
+ * truncating "26,022,906" to "26,022"): we take the first whitespace-delimited
+ * token after "Purse"/"Piggy" that contains a digit, strip everything except
+ * digits/decimal, and honor a k/m/b suffix. Returns NaN if not found.
  */
 public final class PurseReader {
 
     private PurseReader() {}
 
-    // "Purse: 1,234,567" or "Piggy: 1.2M" etc.
-    private static final Pattern PURSE = Pattern.compile(
-            "(?:purse|piggy)\\s*:?\\s*([0-9][0-9,]*\\.?[0-9]*)\\s*([kmb])?", Pattern.CASE_INSENSITIVE);
+    private static volatile String lastRawLine = null;
+    public static String lastRawLine() { return lastRawLine; }
+
+    private static final Pattern NUM = Pattern.compile("[0-9][0-9.]*");
 
     public static double readPurse(MinecraftClient mc) {
         for (String line : ScoreboardReader.sidebarLines(mc)) {
-            Matcher m = PURSE.matcher(line);
-            if (m.find()) {
-                double v = Double.parseDouble(m.group(1).replace(",", ""));
-                String suffix = m.group(2);
-                if (suffix != null) {
-                    switch (suffix.toLowerCase(Locale.ROOT)) {
-                        case "k" -> v *= 1_000d;
-                        case "m" -> v *= 1_000_000d;
-                        case "b" -> v *= 1_000_000_000d;
-                        default -> { }
-                    }
+            String lc = line.toLowerCase(Locale.ROOT);
+            int i = lc.indexOf("purse");
+            if (i < 0) i = lc.indexOf("piggy");
+            if (i < 0) continue;
+
+            lastRawLine = line;
+            for (String tok : line.substring(i).split("\\s+")) {
+                String low = tok.toLowerCase(Locale.ROOT);
+                if (low.chars().noneMatch(Character::isDigit)) continue;
+
+                double mult = low.contains("k") ? 1e3 : low.contains("m") ? 1e6 : low.contains("b") ? 1e9 : 1;
+                Matcher m = NUM.matcher(tok.replaceAll("[^0-9.]", ""));
+                if (!m.find()) continue;
+                try {
+                    return Double.parseDouble(m.group()) * mult;
+                } catch (NumberFormatException ignored) {
                 }
-                return v;
             }
         }
         return Double.NaN;

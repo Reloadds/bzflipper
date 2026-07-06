@@ -39,8 +39,8 @@ public class FlipConfig {
     public boolean useCustomPrice = false;
 
     // ---- Purse-aware spending ----
-    /** Never spend the purse below this many coins. */
-    public double coinReserve = 1_000_000;
+    /** Never spend the purse below this many coins. Raise it to keep a buffer. */
+    public double coinReserve = 0;
 
     /** Fraction of spendable purse (purse - reserve) to commit to a single order. */
     public double orderBudgetFraction = 0.20;
@@ -57,6 +57,9 @@ public class FlipConfig {
 
     /** Minimum net margin (after tax) for an API-sourced flip. */
     public double apiMinMargin = 0.03;
+
+    /** Maximum net margin — anything above is almost always an illiquid/manipulation trap. */
+    public double apiMaxMargin = 0.30;
 
     /** Minimum weekly volume (both sides) for liquidity — avoids dead items. */
     public double apiMinWeeklyVolume = 500_000;

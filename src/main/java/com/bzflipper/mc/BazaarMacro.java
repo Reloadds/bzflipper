@@ -101,6 +101,14 @@ public class BazaarMacro {
         purse = PurseReader.readPurse(mc);
         var cs = api.getCandidates();
 
+        // Debug: show what we read the purse from (visible in logs/latest.log).
+        if (Double.isNaN(purse)) {
+            System.out.println("[bzflipper] purse NOT found. Sidebar lines:");
+            for (String l : ScoreboardReader.sidebarLines(mc)) System.out.println("  | " + l);
+        } else {
+            System.out.println("[bzflipper] purse from line: '" + PurseReader.lastRawLine() + "' -> " + purse);
+        }
+
         log(config.dryRun ? "started (DRY RUN — plans only, no orders)" : "started (LIVE)");
         log(String.format(Locale.ROOT, "purse=%s  apiFlips=%b  candidates=%d%s",
                 Double.isNaN(purse) ? "UNKNOWN (are you on SkyBlock?)" : String.format(Locale.ROOT, "%,.0f", purse),
