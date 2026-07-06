@@ -438,15 +438,29 @@ public class BazaarMacro {
                 ourBuyPrice = PriceMath.buyOrderPrice(topBuy);
                 ourSellPrice = PriceMath.sellOfferPrice(lowSell);
             } else {
-                // Fall back to API top-of-book if the page lore doesn't parse.
                 FlipCandidate q = api.quote(navItem.toLowerCase(Locale.ROOT));
                 if (q != null) { ourBuyPrice = q.ourBuyPrice(); ourSellPrice = q.ourSellPrice(); }
+            }
+            // SAFETY NET: never BUY an item whose LIVE product margin is out of
+            // range (manipulation trap, or navigation landed on the wrong item).
+            if (navAfter == Phase.BUY_OPEN && !Double.isNaN(ourBuyPrice) && ourBuyPrice > 0) {
+                double m = (ourSellPrice * (1 - config.taxFraction) - ourBuyPrice) / ourBuyPrice;
+                if (m < config.apiMinMargin || m > config.apiMaxMargin) {
+                    note(String.format(Locale.ROOT, "§eskip %s§r: live margin %.0f%% out of range", navItem, m * 100));
+                    blacklistUntil.put(navItem.toLowerCase(Locale.ROOT),
+                            System.currentTimeMillis() + config.blacklistMinutes * 60_000L);
+                    activeItem = null;
+                    phase = Phase.PLAN;
+                    return;
+                }
             }
             phase = navAfter;
             return;
         }
-        if (GuiHelper.hasItemNamed(mc, navItem) && !atProduct(mc)) {
-            GuiHelper.clickByName(mc, navItem);
+        // On the search-results screen: click the EXACT item (avoids picking a
+        // similarly-named item like "Lesser Soulflow Engine" for "Soulflow").
+        if (!atProduct(mc) && GuiHelper.hasItemNamed(mc, navItem)) {
+            GuiHelper.clickExactName(mc, navItem);
             return;
         }
         if (navCooldown > 0) { navCooldown--; return; }
@@ -592,9 +606,9 @@ public class BazaarMacro {
     }
 
     private boolean arrivedAtProduct(MinecraftClient mc, String item) {
-        if (!atProduct(mc)) return false;
-        String tok = longestToken(item);
-        return tok.isEmpty() || GuiHelper.screenTitle(mc).contains(tok);
+        // The title is often truncated ("...➜ lesser soulfl"), so verify by the
+        // product's own item icon on the page, which carries the full name.
+        return atProduct(mc) && GuiHelper.hasExactItemNamed(mc, item);
     }
 
     private boolean goToManage(MinecraftClient mc) {

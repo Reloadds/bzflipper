@@ -87,6 +87,30 @@ public final class GuiHelper {
         return findSlotByName(mc, needle) >= 0;
     }
 
+    /** First slot whose name EXACTLY equals {@code needle} (case-insensitive), or -1. */
+    public static int findSlotExact(MinecraftClient mc, String needle) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return -1;
+        String n = needle.toLowerCase(Locale.ROOT).trim();
+        int count = chestSlotCount(chest);
+        for (int i = 0; i < count; i++) {
+            if (name(chest.getSlot(i).getStack()).trim().equals(n)) return i;
+        }
+        return -1;
+    }
+
+    /** True if a slot's name exactly equals {@code needle}. */
+    public static boolean hasExactItemNamed(MinecraftClient mc, String needle) {
+        return findSlotExact(mc, needle) >= 0;
+    }
+
+    /** Click the exact-named slot; fall back to a substring match. True if clicked. */
+    public static boolean clickExactName(MinecraftClient mc, String needle) {
+        int idx = findSlotExact(mc, needle);
+        if (idx < 0) idx = findSlotByName(mc, needle);
+        return idx >= 0 && clickSlotIndex(mc, idx);
+    }
+
     /**
      * Left-click the first chest slot whose name contains {@code needle}.
      * Returns true if something was clicked.
