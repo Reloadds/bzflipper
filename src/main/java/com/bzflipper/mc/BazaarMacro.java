@@ -608,6 +608,11 @@ public class BazaarMacro {
                 if (held.contains(key)) continue;
                 if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // relist-war item
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
+                // Skip items too thin to use a slot's budget (avoids tiny orders):
+                // how much value can the item's volume absorb per order?
+                double volValue = (c.minWeeklyVolume() / 168.0) * config.orderVolumeFraction * c.ourBuyPrice();
+                if (config.minOrderValueFraction > 0
+                        && volValue < config.minOrderValueFraction * spendablePerOrder) continue;
                 activeHourlyVol = c.minWeeklyVolume() / 168.0;
                 activeBypassInv = ItemNames.bypassesInventory(c.tag);
                 activeStackSize = ItemNames.stackSize(c.tag);

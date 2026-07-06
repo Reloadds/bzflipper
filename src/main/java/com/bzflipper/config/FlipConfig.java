@@ -65,6 +65,13 @@ public class FlipConfig {
      */
     public double orderVolumeFraction = 0.5;
 
+    /**
+     * Skip items too illiquid to use a slot: an item's volume must be able to
+     * absorb at least this fraction of the per-slot budget, or it's not worth an
+     * order. Prevents tiny (~800k) orders on thin items. 0 = disable.
+     */
+    public double minOrderValueFraction = 0.35;
+
     // ---- Auto flip sourcing (Hypixel Bazaar API) ----
     /** If true, pick the best flips live from the API instead of the fixed targets list. */
     public boolean useApiFlips = true;
