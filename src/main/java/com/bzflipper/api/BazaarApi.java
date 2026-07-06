@@ -90,6 +90,7 @@ public class BazaarApi {
         if (!root.has("success") || !root.get("success").getAsBoolean()) {
             throw new IllegalStateException("API success=false");
         }
+        ensureItemNames();
         JsonObject products = root.getAsJsonObject("products");
         List<FlipCandidate> list = new ArrayList<>();
 
@@ -115,7 +116,7 @@ public class BazaarApi {
             if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
             if (config.apiMaxUnitPrice > 0 && topBuyOrder > config.apiMaxUnitPrice) continue;
 
-            list.add(new FlipCandidate(e.getKey(), displayName(e.getKey()),
+            list.add(new FlipCandidate(e.getKey(), ItemNames.name(e.getKey()),
                     topBuyOrder, lowestSellOffer, buyMW, sellMW));
         }
 
@@ -124,18 +125,22 @@ public class BazaarApi {
         lastUpdatedMillis = System.currentTimeMillis();
     }
 
-    /**
-     * Best-effort tag -> Bazaar display name (ENCHANTED_CACTUS_GREEN -> "Enchanted
-     * Cactus Green"). Correct for most items; a handful of Bazaar names don't map
-     * cleanly from the tag — for those, add explicit config targets instead.
-     */
-    static String displayName(String tag) {
-        String[] parts = tag.toLowerCase(Locale.ROOT).split("_");
-        StringBuilder sb = new StringBuilder();
-        for (String w : parts) {
-            if (w.isEmpty()) continue;
-            sb.append(Character.toUpperCase(w.charAt(0))).append(w.substring(1)).append(' ');
+    /** Fetch the real item-name table once (resources/skyblock/items). */
+    private void ensureItemNames() {
+        if (ItemNames.loaded()) return;
+        try {
+            HttpRequest req = HttpRequest.newBuilder(URI.create(
+                    "https://api.hypixel.net/v2/resources/skyblock/items"))
+                    .header("User-Agent", "bzflipper").timeout(Duration.ofSeconds(40)).GET().build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 200) {
+                ItemNames.load(JsonParser.parseString(resp.body()).getAsJsonObject());
+                System.out.println("[bzflipper] loaded real item names");
+            } else {
+                System.err.println("[bzflipper] item-names HTTP " + resp.statusCode());
+            }
+        } catch (Exception e) {
+            System.err.println("[bzflipper] item-names load failed: " + e.getMessage());
         }
-        return sb.toString().trim();
     }
 }
