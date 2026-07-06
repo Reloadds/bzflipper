@@ -52,6 +52,13 @@ public class FlipConfig {
     /** Hard cap on units per order (Bazaar's own limit is 71,680). */
     public int maxUnitsPerOrder = 71_680;
 
+    /** Cap orders so claimed items fit in inventory (avoids overflow to stash).
+     *  Essences/shards bypass inventory and are never capped. */
+    public boolean capByInventory = true;
+
+    /** Keep this many inventory slots free as a buffer when sizing by inventory. */
+    public int inventoryBuffer = 3;
+
     /**
      * Size each order to at most this fraction of the item's HOURLY volume, so
      * orders on liquid (high-demand) items are large but still fill quickly.

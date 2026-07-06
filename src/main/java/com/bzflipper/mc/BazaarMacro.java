@@ -2,6 +2,7 @@ package com.bzflipper.mc;
 
 import com.bzflipper.api.BazaarApi;
 import com.bzflipper.api.FlipCandidate;
+import com.bzflipper.api.ItemNames;
 import com.bzflipper.config.FlipConfig;
 import com.bzflipper.config.FlipTarget;
 import com.bzflipper.core.BazaarStrings;
@@ -76,6 +77,8 @@ public class BazaarMacro {
     private double ourBuyPrice = Double.NaN, ourSellPrice = Double.NaN;
     private int activeAmount = 0;
     private double activeHourlyVol = Double.MAX_VALUE;
+    private int activeStackSize = 64;         // for inventory-fit sizing
+    private boolean activeBypassInv = false;  // essence/shards bypass inventory
 
     // Cancel context (which side we're cancelling and why).
     private boolean cancelIsBuy = true;
@@ -414,6 +417,8 @@ public class BazaarMacro {
                 if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // relist-war item
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
                 activeHourlyVol = c.minWeeklyVolume() / 168.0;
+                activeBypassInv = ItemNames.bypassesInventory(c.tag);
+                activeStackSize = ItemNames.stackSize(c.tag);
                 return c.displayName;
             }
             return null;
@@ -421,6 +426,8 @@ public class BazaarMacro {
         for (FlipTarget t : config.targets) {
             if (!held.contains(t.product.toLowerCase(Locale.ROOT))) {
                 activeHourlyVol = Double.MAX_VALUE;
+                activeBypassInv = false;
+                activeStackSize = 64;
                 return t.product;
             }
         }
@@ -489,7 +496,18 @@ public class BazaarMacro {
         int byVolume = (activeHourlyVol == Double.MAX_VALUE)
                 ? config.maxUnitsPerOrder
                 : (int) Math.max(1, activeHourlyVol * config.orderVolumeFraction);
-        activeAmount = Math.max(1, Math.min(byPurse, byVolume));
+
+        // Inventory-fit cap: essences/shards bypass inventory (unlimited); other
+        // items must fit in free slots × stack size so a full claim never overflows
+        // to the stash.
+        int byInv = Integer.MAX_VALUE;
+        if (config.capByInventory && !activeBypassInv) {
+            int free = Math.max(0, GuiHelper.freeInventorySlots(mc) - config.inventoryBuffer);
+            byInv = free * Math.max(1, activeStackSize);
+            if (byInv < 1) { note("§einventory full§r — skipping " + activeItem); phase = Phase.PLAN; return; }
+        }
+
+        activeAmount = Math.max(1, Math.min(Math.min(byPurse, byVolume), byInv));
         statusLine = "amount " + activeAmount + " × " + activeItem;
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) {
             requestSign(Integer.toString(activeAmount), Phase.BUY_PRICE);

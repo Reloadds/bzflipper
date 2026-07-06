@@ -225,6 +225,19 @@ public final class GuiHelper {
         return out;
     }
 
+    /** Count empty slots in the player inventory portion of the open chest GUI. */
+    public static int freeInventorySlots(MinecraftClient mc) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return 99;   // unknown -> don't cap
+        int container = chestSlotCount(chest);
+        int total = chest.slots.size();
+        int free = 0;
+        for (int i = container; i < total; i++) {
+            if (chest.getSlot(i).getStack().isEmpty()) free++;
+        }
+        return free;
+    }
+
     /** Left-click a specific chest slot index. True if clicked. */
     public static boolean clickSlotIndex(MinecraftClient mc, int idx) {
         GenericContainerScreenHandler chest = openChest(mc);

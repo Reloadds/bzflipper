@@ -22,19 +22,48 @@ public final class ItemNames {
     private ItemNames() {}
 
     private static volatile Map<String, String> MAP = Map.of();
+    private static volatile Map<String, String> MATERIAL = Map.of();
 
-    /** Load id -> name from the resources endpoint JSON root. */
+    /** Load id -> name (and material) from the resources endpoint JSON root. */
     public static void load(JsonObject resourcesRoot) {
         JsonArray items = resourcesRoot.getAsJsonArray("items");
         if (items == null) return;
         Map<String, String> m = new HashMap<>();
+        Map<String, String> mats = new HashMap<>();
         for (JsonElement el : items) {
             JsonObject o = el.getAsJsonObject();
-            if (o.has("id") && o.has("name")) {
-                m.put(o.get("id").getAsString(), clean(o.get("name").getAsString()));
-            }
+            if (!o.has("id")) continue;
+            String id = o.get("id").getAsString();
+            if (o.has("name")) m.put(id, clean(o.get("name").getAsString()));
+            if (o.has("material")) mats.put(id, o.get("material").getAsString());
         }
         MAP = m;
+        MATERIAL = mats;
+    }
+
+    /** True if claiming this item bypasses the inventory (essences → essence
+     *  storage, shards → attribute storage), so no inventory limit applies. */
+    public static boolean bypassesInventory(String tag) {
+        return tag != null && (tag.startsWith("ESSENCE_") || tag.startsWith("SHARD_"));
+    }
+
+    /** Best-effort stack size: 1 for enchanted books and gear/tools/skull items,
+     *  64 for normal materials. Used to size orders so claims fit in inventory. */
+    public static int stackSize(String tag) {
+        if (tag == null) return 64;
+        if (tag.startsWith("ENCHANTMENT_")) return 1;   // enchanted books
+        return isNonStackable(MATERIAL.getOrDefault(tag, "")) ? 1 : 64;
+    }
+
+    private static boolean isNonStackable(String mat) {
+        if (mat == null || mat.isEmpty()) return false;
+        if (mat.equals("SKULL_ITEM")) return true;
+        for (String p : new String[]{"SWORD", "PICKAXE", "_AXE", "SPADE", "SHOVEL", "_HOE",
+                "BOW", "HELMET", "CHESTPLATE", "LEGGINGS", "BOOTS", "FISHING_ROD",
+                "SHEARS", "SHIELD", "ELYTRA", "TRIDENT", "ENCHANTED_BOOK"}) {
+            if (mat.contains(p)) return true;
+        }
+        return false;
     }
 
     public static boolean loaded() { return !MAP.isEmpty(); }
