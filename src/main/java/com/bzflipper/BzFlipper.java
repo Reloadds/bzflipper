@@ -62,7 +62,8 @@ public class BzFlipper implements ClientModInitializer {
     private void onEndTick(MinecraftClient mc) {
         while (toggleKey.wasPressed()) macro.toggle();
         while (panicKey.wasPressed()) macro.stop("panic key");
-        while (dumpKey.wasPressed()) GuiDump.dump(mc);
+        // Note: dumping is automatic now (GuiDump.autoDump from the macro tick),
+        // because keybinds can't fire while a Bazaar GUI is open.
         macro.onTick(mc);
     }
 }
