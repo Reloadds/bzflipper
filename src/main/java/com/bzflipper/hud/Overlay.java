@@ -64,8 +64,9 @@ public class Overlay {
                 coins(t.recentPerHour()), coins(t.sessionPerHour())), x + 2, ly, WHITE);
         ly += LINE;
 
-        draw(ctx, mc, String.format(Locale.ROOT, "profit %s   flips %d   fills %dB/%dS",
-                coins(t.total()), macro.flipsCompleted, macro.buysFilled, macro.sellsFilled),
+        draw(ctx, mc, String.format(Locale.ROOT, "profit %s (Σ %s)   flips %d   %dB/%dS",
+                coins(t.total()), coins(macro.allTimeProfit),
+                macro.flipsCompleted, macro.buysFilled, macro.sellsFilled),
                 x + 2, ly, GREY);
         ly += LINE;
 

@@ -5,7 +5,10 @@ import com.bzflipper.config.FlipConfig;
 import com.bzflipper.hud.Overlay;
 import com.bzflipper.mc.AutoStart;
 import com.bzflipper.mc.BazaarMacro;
+import com.bzflipper.mc.ScoreboardReader;
 import com.bzflipper.track.ProfitTracker;
+
+import java.util.Locale;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
@@ -31,6 +34,7 @@ public class BzFlipper implements ClientModInitializer {
     private KeyBinding toggleKey;
     private KeyBinding panicKey;
     private KeyBinding dumpKey;
+    private int skyblockLostTicks = 0;
 
     @Override
     public void onInitializeClient() {
@@ -66,6 +70,20 @@ public class BzFlipper implements ClientModInitializer {
         while (panicKey.wasPressed()) { autoStart.disarm("panic key"); macro.stop("panic key"); }
         // Note: dumping is automatic now (GuiDump.autoDump from the macro tick),
         // because keybinds can't fire while a Bazaar GUI is open.
+        // Watchdog: kicked to a lobby/limbo mid-session? Stop cleanly and let
+        // autostart walk us back (SkyBlock -> island -> resume).
+        if (macro.isEnabled() && mc.world != null) {
+            boolean onSb = ScoreboardReader.title(mc).toLowerCase(Locale.ROOT).contains("skyblock");
+            skyblockLostTicks = onSb ? 0 : skyblockLostTicks + 1;
+            if (skyblockLostTicks > 200) {   // ~10s off SkyBlock = real kick, not a transfer blip
+                skyblockLostTicks = 0;
+                macro.stop("left SkyBlock");
+                autoStart.rearm("kicked from SkyBlock");
+            }
+        } else {
+            skyblockLostTicks = 0;
+        }
+
         autoStart.tick(mc);
         macro.onTick(mc);
     }

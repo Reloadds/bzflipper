@@ -41,6 +41,15 @@ public class AutoStart {
         this.macro = macro;
     }
 
+    /** Restart the whole sequence (e.g., after a lobby kick mid-session). */
+    public void rearm(String why) {
+        System.out.println("[bzflipper] autostart re-armed: " + why);
+        stage = Stage.WAIT_WORLD;
+        timer = 0;
+        retries = 0;
+        worldBefore = null;
+    }
+
     /** Manual key press → the user takes over; stay quiet until next login. */
     public void disarm(String why) {
         if (stage != Stage.DISARMED && stage != Stage.DONE) {

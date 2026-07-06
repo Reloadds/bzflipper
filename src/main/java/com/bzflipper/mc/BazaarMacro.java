@@ -101,8 +101,9 @@ public class BazaarMacro {
     private final Deque<String> pendingSells = new ArrayDeque<>();
     private final Map<String, Integer> pendingSellAmounts = new HashMap<>();
 
-    /** Our book: what we believe we have open, keyed by lowercase item name. */
+    /** Our book: what we believe we have open, keyed by canonical item key. */
     private static final class OrderInfo {
+        String name = "";           // display name (needed for /bz navigation)
         double buyPrice = Double.NaN;
         double sellPrice = Double.NaN;
         int amount;
@@ -117,8 +118,15 @@ public class BazaarMacro {
     private final Map<String, Long> blacklistUntil = new HashMap<>();
     private boolean cancelRebuy = true;   // whether pCancel should relist the buy
 
+    // ---- Persistence (survives relogs: leftover goods get re-listed) ----
+    private static final com.google.gson.Gson GSON =
+            new com.google.gson.GsonBuilder().setPrettyPrinting().create();
+    private boolean stateDirty = false;
+    private long lastStateSave = 0;
+
     // ---- HUD-exposed ----
     public volatile String statusLine = "idle";
+    public volatile double allTimeProfit = 0;
     public volatile double purse = Double.NaN;
     public volatile int buyCount = 0, sellCount = 0;
     public volatile int ordersPlaced = 0, buysFilled = 0, sellsFilled = 0, flipsCompleted = 0;
@@ -130,6 +138,64 @@ public class BazaarMacro {
         this.config = config;
         this.api = api;
         this.tracker = tracker;
+        loadState();
+    }
+
+    // ---- state persistence ----
+
+    private static final class PersistState {
+        Map<String, OrderInfo> orders = new HashMap<>();
+        java.util.List<String> pendingSells = new java.util.ArrayList<>();
+        Map<String, Integer> pendingSellAmounts = new HashMap<>();
+        Map<String, Long> blacklistUntil = new HashMap<>();
+        double allTimeProfit = 0;
+    }
+
+    private java.nio.file.Path statePath() {
+        return net.fabricmc.loader.api.FabricLoader.getInstance()
+                .getConfigDir().resolve("bzflipper-state.json");
+    }
+
+    private void loadState() {
+        try {
+            java.nio.file.Path p = statePath();
+            if (!java.nio.file.Files.exists(p)) return;
+            PersistState s = GSON.fromJson(java.nio.file.Files.readString(p), PersistState.class);
+            if (s == null) return;
+            if (s.orders != null) orders.putAll(s.orders);
+            if (s.pendingSells != null) for (String it : s.pendingSells) {
+                if (!pendingSells.contains(it)) pendingSells.addLast(it);
+            }
+            if (s.pendingSellAmounts != null) pendingSellAmounts.putAll(s.pendingSellAmounts);
+            if (s.blacklistUntil != null) blacklistUntil.putAll(s.blacklistUntil);
+            allTimeProfit = s.allTimeProfit;
+            System.out.println("[bzflipper] restored state: " + orders.size()
+                    + " orders, " + pendingSells.size() + " pending sells");
+        } catch (Exception e) {
+            System.err.println("[bzflipper] state load failed: " + e.getMessage());
+        }
+    }
+
+    private void saveStateIfDue() {
+        long now = System.currentTimeMillis();
+        if (!stateDirty || now - lastStateSave < 10_000) return;
+        saveState();
+    }
+
+    private void saveState() {
+        try {
+            PersistState s = new PersistState();
+            s.orders.putAll(orders);
+            s.pendingSells.addAll(pendingSells);
+            s.pendingSellAmounts.putAll(pendingSellAmounts);
+            s.blacklistUntil.putAll(blacklistUntil);
+            s.allTimeProfit = allTimeProfit;
+            java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
+            stateDirty = false;
+            lastStateSave = System.currentTimeMillis();
+        } catch (Exception e) {
+            System.err.println("[bzflipper] state save failed: " + e.getMessage());
+        }
     }
 
     public boolean isEnabled() { return enabled; }
@@ -168,6 +234,7 @@ public class BazaarMacro {
         phase = Phase.IDLE;
         statusLine = "stopped: " + why;
         log("stopped: " + why);
+        saveState();
     }
 
     // ---- main loop ----
@@ -215,6 +282,7 @@ public class BazaarMacro {
             case CANCEL       -> pCancel(mc);
             case IDLE         -> { }
         }
+        saveStateIfDue();
     }
 
     // ---- planning: parse grid, take highest-priority action ----
@@ -228,6 +296,7 @@ public class BazaarMacro {
         sellCount = grid.size() - buyCount;
 
         adoptAndPrune(grid);
+        sweepLeftovers(mc, grid);
 
         // 1) Claim goods/coins the moment they're claimable — Hypixel marks an
         //    order "Click to claim!" as soon as ANY of it fills, so this claims
@@ -379,6 +448,31 @@ public class BazaarMacro {
                 buyCount, sellCount, idleReason());
     }
 
+    /**
+     * Re-list leftovers: goods we own (from this OR a previous session — state is
+     * persisted) that sit in the inventory with no live sell offer get queued for
+     * sale. Only items the flipper itself bought are touched; personal items are
+     * never auto-sold.
+     */
+    private void sweepLeftovers(MinecraftClient mc, List<ParsedOrder> grid) {
+        Set<String> inv = new HashSet<>();
+        for (String n : GuiHelper.playerInventoryNames(mc)) inv.add(key(n));
+        if (inv.isEmpty()) return;
+
+        for (Map.Entry<String, OrderInfo> e : orders.entrySet()) {
+            OrderInfo oi = e.getValue();
+            if (oi.name == null || oi.name.isEmpty()) continue;
+            if (!inv.contains(e.getKey())) continue;                       // not holding it
+            String k = e.getKey();
+            boolean liveSell = grid.stream().anyMatch(g -> !g.buy() && g.key().equals(k));
+            boolean queued = pendingSells.stream().anyMatch(s -> key(s).equals(k));
+            if (liveSell || queued) continue;
+            pendingSells.addLast(oi.name);
+            stateDirty = true;
+            log("found leftover " + oi.name + " in inventory — queueing sell");
+        }
+    }
+
     /** Adopt unknown grid orders (restart recovery) and prune vanished ones. */
     private void adoptAndPrune(List<ParsedOrder> grid) {
         Set<String> seen = new HashSet<>();
@@ -387,10 +481,13 @@ public class BazaarMacro {
             OrderInfo oi = orders.get(o.key());
             if (oi == null) {
                 oi = new OrderInfo();
+                oi.name = o.item();
                 oi.amount = o.amount();
                 if (o.buy()) oi.buyPrice = o.pricePerUnit(); else oi.sellPrice = o.pricePerUnit();
                 orders.put(o.key(), oi);
+                stateDirty = true;
             } else {
+                if (oi.name == null || oi.name.isEmpty()) oi.name = o.item();
                 // The grid is the truth — keep our records synced to the actual
                 // placed prices (preset buttons can land ±0.1 from our estimate).
                 if (!Double.isNaN(o.pricePerUnit())) {
@@ -412,6 +509,8 @@ public class BazaarMacro {
 
     private void onBuyClaimed(ParsedOrder o) {
         OrderInfo oi = orders.computeIfAbsent(o.key(), k -> new OrderInfo());
+        if (oi.name == null || oi.name.isEmpty()) oi.name = o.item();
+        stateDirty = true;
         if (Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
         if (oi.amount <= 0) oi.amount = o.amount();
 
@@ -446,6 +545,8 @@ public class BazaarMacro {
         if (!Double.isNaN(buyP) && !Double.isNaN(sellP)) {
             double profit = (sellP * (1.0 - config.taxFraction) - buyP) * newSold;
             tracker.addProfit(profit);
+            allTimeProfit += profit;
+            stateDirty = true;
             log(String.format(Locale.ROOT, "§asold§r %d× %s  %+,.0f coins  (session %,.0f)",
                     newSold, o.item(), profit, tracker.total()));
         } else {
@@ -530,6 +631,15 @@ public class BazaarMacro {
     private void pNavSearch(MinecraftClient mc) {
         statusLine = "→ " + navItem;
         if (arrivedAtProduct(mc, navItem)) {
+            // Auto-detect the real bazaar tax ("current tax: 1.1%") so margin
+            // math uses YOUR exact rate, not an assumption.
+            double liveTax = GuiHelper.readTaxFraction(mc);
+            if (!Double.isNaN(liveTax) && liveTax > 0 && liveTax < 0.05
+                    && Math.abs(liveTax - config.taxFraction) > 1e-4) {
+                config.taxFraction = liveTax;
+                config.save();
+                log(String.format(Locale.ROOT, "detected bazaar tax: %.2f%%", liveTax * 100));
+            }
             double topBuy = GuiHelper.readCoinPrice(mc, BazaarStrings.BTN_BUY_ORDER, BazaarStrings.LORE_COINS);
             double lowSell = GuiHelper.readCoinPrice(mc, BazaarStrings.BTN_SELL_OFFER, BazaarStrings.LORE_COINS);
             if (!Double.isNaN(topBuy) && !Double.isNaN(lowSell)) {
@@ -610,10 +720,12 @@ public class BazaarMacro {
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CREATE_BUY)
                 || GuiHelper.clickByName(mc, BazaarStrings.BTN_CONFIRM)) {
             OrderInfo oi = new OrderInfo();
+            oi.name = activeItem;
             oi.buyPrice = ourBuyPrice;
             oi.amount = activeAmount;
             orders.put(key(activeItem), oi);
             ordersPlaced++;
+            stateDirty = true;
             buyCooldown = config.orderCooldownTicks;
             log(String.format(Locale.ROOT, "§abuy§r %d× %s @ %.1f  (%,.0f coins)",
                     activeAmount, activeItem, ourBuyPrice, activeAmount * ourBuyPrice));
@@ -667,9 +779,11 @@ public class BazaarMacro {
         if (activeItem == null) { phase = Phase.PLAN; return; }
         String key = key(activeItem);
         OrderInfo oi = orders.computeIfAbsent(key, k -> new OrderInfo());
+        if (oi.name == null || oi.name.isEmpty()) oi.name = activeItem;
         oi.sellPrice = ourSellPrice;
         if (oi.amount <= 0) oi.amount = activeAmount;
         ordersPlaced++;
+        stateDirty = true;
         pendingSells.removeFirstOccurrence(activeItem);
         pendingSellAmounts.remove(key);
         log(String.format(Locale.ROOT, "§6sell§r %s @ %.1f", activeItem, ourSellPrice));
@@ -733,6 +847,8 @@ public class BazaarMacro {
                 double profit = (q.topBuyOrder * (1.0 - config.taxFraction) - oi.buyPrice)
                         * pendingInstasellAmount;
                 tracker.addProfit(profit);
+                allTimeProfit += profit;
+                stateDirty = true;
                 log(String.format(Locale.ROOT, "§ebailed§r %d× %s  %+,.0f coins",
                         pendingInstasellAmount, pendingInstasell, profit));
             } else {

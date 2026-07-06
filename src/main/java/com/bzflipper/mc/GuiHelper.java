@@ -225,6 +225,40 @@ public final class GuiHelper {
         return out;
     }
 
+    /** Names of items in the player-inventory portion of the open chest GUI. */
+    public static Set<String> playerInventoryNames(MinecraftClient mc) {
+        Set<String> out = new HashSet<>();
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return out;
+        int container = chestSlotCount(chest);
+        int total = chest.slots.size();
+        for (int i = container; i < total; i++) {
+            String nm = name(chest.getSlot(i).getStack());
+            if (!nm.isEmpty()) out.add(nm);
+        }
+        return out;
+    }
+
+    /** Read the live bazaar tax fraction from the product page's "Sell Instantly"
+     *  lore ("current tax: 1.1%"). Returns NaN if not visible. */
+    public static double readTaxFraction(MinecraftClient mc) {
+        int idx = findSlotByName(mc, "sell instantly");
+        if (idx < 0) return Double.NaN;
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return Double.NaN;
+        for (String line : lore(chest.getSlot(idx).getStack())) {
+            if (!line.contains("tax")) continue;
+            Matcher m = NUMBER.matcher(line);
+            if (m.find()) {
+                try {
+                    return Double.parseDouble(m.group(1).replace(",", "")) / 100.0;
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        return Double.NaN;
+    }
+
     /** Count empty slots in the player inventory portion of the open chest GUI. */
     public static int freeInventorySlots(MinecraftClient mc) {
         GenericContainerScreenHandler chest = openChest(mc);
