@@ -133,6 +133,28 @@ public class BazaarApi {
             if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
             if (config.apiMaxUnitPrice > 0 && topBuyOrder > config.apiMaxUnitPrice) continue;
 
+            // --- Anti-manipulation guards ---
+            // 1) Lone-outlier top order: if the #1 book entry sits far away from
+            //    #2, someone is spoofing the top of the book. Skip.
+            if (buyOrders.size() > 1) {
+                double second = buyOrders.get(1).getAsJsonObject().get("pricePerUnit").getAsDouble();
+                if (second > 0 && (topBuyOrder - second) / second > config.apiMaxTopGap) continue;
+            }
+            if (sellOffers.size() > 1) {
+                double second = sellOffers.get(1).getAsJsonObject().get("pricePerUnit").getAsDouble();
+                if (second > 0 && (second - lowestSellOffer) / lowestSellOffer > config.apiMaxTopGap) continue;
+            }
+            // 2) Weighted-average cross-check: quick_status prices are volume-
+            //    weighted averages of the book (naming inverted like the summaries:
+            //    qs.buyPrice ~ sell-offer side, qs.sellPrice ~ buy-order side).
+            //    If the spread collapses on averages, the top-of-book spread is fake.
+            double avgSellOffer = q.has("buyPrice") ? q.get("buyPrice").getAsDouble() : 0;
+            double avgBuyOrder  = q.has("sellPrice") ? q.get("sellPrice").getAsDouble() : 0;
+            if (avgSellOffer > 0 && avgBuyOrder > 0) {
+                double weightedMargin = PriceMath.netMarginFraction(avgBuyOrder, avgSellOffer, config.taxFraction);
+                if (weightedMargin < config.apiMinMargin * 0.4) continue;
+            }
+
             list.add(c);
         }
 

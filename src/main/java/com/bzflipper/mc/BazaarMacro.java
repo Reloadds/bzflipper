@@ -91,9 +91,15 @@ public class BazaarMacro {
         double buyPrice = Double.NaN;
         double sellPrice = Double.NaN;
         int amount;
+        int claimedSoFar = 0;       // units already claimed from a partially-filled buy
         long placedAt = System.currentTimeMillis();
     }
     private final Map<String, OrderInfo> orders = new HashMap<>();
+
+    /** Relist-war protection: per-item relist counts and temporary blacklist. */
+    private final Map<String, Integer> relistCounts = new HashMap<>();
+    private final Map<String, Long> blacklistUntil = new HashMap<>();
+    private boolean cancelRebuy = true;   // whether pCancel should relist the buy
 
     // ---- HUD-exposed ----
     public volatile String statusLine = "idle";
@@ -202,18 +208,41 @@ public class BazaarMacro {
 
         adoptAndPrune(grid);
 
-        // 1) Claim any filled order (clicking a claimable order claims it).
+        // 1) Claim goods as they fill — full orders always; partial buys once
+        //    enough is filled to be worth listing (partialClaimFraction).
         for (ParsedOrder o : grid) {
-            if (!o.filled()) continue;
+            boolean claimNow = o.filled()
+                    || (o.buy() && o.claimable()
+                        && o.filledPct() >= config.partialClaimFraction * 100);
+            if (!claimNow) continue;
+            if (config.dryRun) { note("DRY: would claim " + o.item()); continue; }
             statusLine = "claiming " + (o.buy() ? "bought " : "sold ") + o.item();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) {
                 if (o.buy()) onBuyClaimed(o);
-                else onSellClaimed(o);
+                else onSellClaimed(o, grid);
             }
             return; // one action per pass
         }
 
-        // 2) Relist anything beaten on price — exact math vs live top-of-book.
+        // 2) Consolidate: if we hold new goods for an item that ALREADY has a live
+        //    sell offer, cancel that offer — the returned + new units then get
+        //    listed together as one fresh offer at the front of the queue.
+        for (String pending : pendingSells) {
+            String key = pending.toLowerCase(Locale.ROOT);
+            ParsedOrder liveSell = grid.stream()
+                    .filter(g -> !g.buy() && g.key().equals(key)).findFirst().orElse(null);
+            if (liveSell == null) continue;
+            if (config.dryRun) { note("DRY: would consolidate sell of " + pending); continue; }
+            statusLine = "consolidating sell: " + pending;
+            cancelIsBuy = false;
+            cancelRebuy = false;
+            cancelItem = pending;
+            cancelAmount = liveSell.amount();
+            if (GuiHelper.clickSlotIndex(mc, liveSell.slot())) phase = Phase.CANCEL;
+            return;
+        }
+
+        // 3) Relist anything beaten on price — exact math vs live top-of-book.
         for (ParsedOrder o : grid) {
             if (o.filled()) continue;
             FlipCandidate q = api.quote(o.key());
@@ -223,15 +252,18 @@ public class BazaarMacro {
                     : q.lowestSellOffer < o.pricePerUnit() - EPS;  // someone offers lower than us
             if (!beaten) continue;
             if (config.dryRun) { note("DRY: would relist " + o.item()); continue; }
-            statusLine = "beaten on " + o.item() + " — cancelling";
+            int relists = relistCounts.merge(o.key(), 1, Integer::sum);
+            statusLine = "beaten on " + o.item() + " — cancelling (relist #" + relists + ")";
             cancelIsBuy = o.buy();
+            // Buy side: give up after too many relist wars (manipulated/contested item).
+            cancelRebuy = !o.buy() || relists <= config.maxRelistsPerOrder;
             cancelItem = o.item();
             cancelAmount = o.amount();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) phase = Phase.CANCEL;
             return;
         }
 
-        // 3) Sell claimed goods.
+        // 4) Sell claimed goods (fresh competitive price read at listing time).
         if (!pendingSells.isEmpty()) {
             String item = pendingSells.peekFirst();
             activeItem = item;
@@ -240,7 +272,7 @@ public class BazaarMacro {
             return;
         }
 
-        // 4) Open a new buy order with the best-ranked flip we don't hold.
+        // 5) Open a new buy order with the best-ranked flip we don't hold.
         if (orders.size() < config.maxOpenOrders && buyCooldown <= 0) {
             String pick = pickNextItem(grid);
             if (pick != null) {
@@ -283,28 +315,52 @@ public class BazaarMacro {
     }
 
     private void onBuyClaimed(ParsedOrder o) {
+        OrderInfo oi = orders.computeIfAbsent(o.key(), k -> new OrderInfo());
+        if (Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
+        if (oi.amount <= 0) oi.amount = o.amount();
+
+        // Estimate the units this claim just banked (fill % minus already claimed).
+        int estFilled = o.filled() ? o.amount()
+                : (int) Math.floor(o.amount() * o.filledPct() / 100.0);
+        int newUnits = Math.max(0, estFilled - oi.claimedSoFar);
+        if (newUnits == 0) newUnits = Math.max(1, o.amount() - oi.claimedSoFar);
+        oi.claimedSoFar = Math.min(o.amount(), oi.claimedSoFar + newUnits);
+
         buysFilled++;
-        pendingSells.addLast(o.item());
-        pendingSellAmounts.put(o.key(), o.amount());
-        OrderInfo oi = orders.get(o.key());
-        if (oi != null && Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
-        log("claimed " + o.amount() + "× " + o.item() + " — will list for sale");
+        if (!pendingSells.contains(o.item())) pendingSells.addLast(o.item());
+        pendingSellAmounts.merge(o.key(), newUnits, Integer::sum);
+        log("claimed " + newUnits + "× " + o.item()
+                + (o.filled() ? "" : String.format(Locale.ROOT, " (%.0f%% filled)", o.filledPct()))
+                + " — will list for sale");
     }
 
-    private void onSellClaimed(ParsedOrder o) {
+    private void onSellClaimed(ParsedOrder o, List<ParsedOrder> grid) {
         sellsFilled++;
         flipsCompleted++;
-        OrderInfo oi = orders.remove(o.key());
-        double sellP = oi != null && !Double.isNaN(oi.sellPrice) ? oi.sellPrice : o.pricePerUnit();
+        OrderInfo oi = orders.get(o.key());
+        double sellP = !Double.isNaN(o.pricePerUnit()) ? o.pricePerUnit()
+                : (oi != null ? oi.sellPrice : Double.NaN);
         double buyP = oi != null ? oi.buyPrice : Double.NaN;
-        int amt = oi != null && oi.amount > 0 ? oi.amount : o.amount();
-        if (!Double.isNaN(buyP) && !Double.isNaN(sellP)) {
+        int amt = o.amount() > 0 ? o.amount() : (oi != null ? oi.amount : 0);
+        if (!Double.isNaN(buyP) && !Double.isNaN(sellP) && amt > 0) {
             double profit = (sellP * (1.0 - config.taxFraction) - buyP) * amt;
             tracker.addProfit(profit);
             log(String.format(Locale.ROOT, "§aflip done§r: %s  %+,.0f coins  (session %,.0f)",
                     o.item(), profit, tracker.total()));
         } else {
             log("claimed sold " + o.item() + " (buy price unknown — profit not tracked)");
+        }
+        // Keep the entry if this item's BUY order is still working (partial-claim
+        // flow); otherwise the flip is fully closed.
+        boolean buyStillOpen = grid.stream().anyMatch(g -> g.buy() && g.key().equals(o.key()));
+        boolean stillPending = pendingSells.stream()
+                .anyMatch(s -> s.toLowerCase(Locale.ROOT).equals(o.key()));
+        if (oi != null) {
+            oi.sellPrice = Double.NaN;
+            if (!buyStillOpen && !stillPending) {
+                orders.remove(o.key());
+                relistCounts.remove(o.key());
+            }
         }
     }
 
@@ -328,9 +384,11 @@ public class BazaarMacro {
 
         if (config.useApiFlips) {
             if (Double.isNaN(purse) || spendablePerOrder <= 0) return null;
+            long now = System.currentTimeMillis();
             for (FlipCandidate c : api.getCandidates()) {
                 String key = c.displayName.toLowerCase(Locale.ROOT);
                 if (held.contains(key)) continue;
+                if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // relist-war item
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
                 activeHourlyVol = c.minWeeklyVolume() / 168.0;
                 return c.displayName;
@@ -452,14 +510,28 @@ public class BazaarMacro {
         statusLine = "cancelling " + cancelItem;
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CANCEL_ORDER)
                 || GuiHelper.clickByName(mc, "cancel")) {
-            log("relisting " + cancelItem);
+            String key = cancelItem.toLowerCase(Locale.ROOT);
             if (cancelIsBuy) {
-                activeItem = cancelItem;
-                startNav(cancelItem, Phase.BUY_OPEN);
+                if (cancelRebuy) {
+                    log("relisting buy: " + cancelItem);
+                    activeItem = cancelItem;
+                    startNav(cancelItem, Phase.BUY_OPEN);
+                } else {
+                    // Relist war lost — walk away from this item for a while.
+                    blacklistUntil.put(key, System.currentTimeMillis()
+                            + config.blacklistMinutes * 60_000L);
+                    relistCounts.remove(key);
+                    orders.remove(key);
+                    log("§e" + cancelItem + " is too contested — blacklisted "
+                            + config.blacklistMinutes + "m");
+                    phase = Phase.PLAN;
+                }
             } else {
-                // Unsold units come back to the inventory — list them again.
-                pendingSells.addLast(cancelItem);
-                pendingSellAmounts.put(cancelItem.toLowerCase(Locale.ROOT), cancelAmount);
+                // Unsold units return to the inventory — queue them (merged with
+                // any newly claimed units) to be listed as ONE fresh offer.
+                if (!pendingSells.contains(cancelItem)) pendingSells.addLast(cancelItem);
+                pendingSellAmounts.merge(key, Math.max(0, cancelAmount), Integer::sum);
+                log("relisting sell: " + cancelItem);
                 phase = Phase.PLAN;
             }
         }

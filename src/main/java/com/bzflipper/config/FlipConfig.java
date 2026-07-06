@@ -76,6 +76,23 @@ public class FlipConfig {
     /** Skip API items whose unit buy price exceeds this (0 = no cap). Keeps orders affordable. */
     public double apiMaxUnitPrice = 0;
 
+    // ---- Anti-manipulation guards ----
+    /**
+     * Max allowed price gap between the #1 and #2 entries in the order book.
+     * A lone top order far from the rest of the book is a spoof/manipulation.
+     */
+    public double apiMaxTopGap = 0.15;
+
+    // ---- Claiming / relisting behaviour ----
+    /** Claim a buy order's goods once at least this fraction is filled (1.0 = wait for full). */
+    public double partialClaimFraction = 0.15;
+
+    /** After this many relists on one order, stop fighting: blacklist the item for a while. */
+    public int maxRelistsPerOrder = 6;
+
+    /** How long a relist-war item stays blacklisted (minutes). */
+    public int blacklistMinutes = 30;
+
     /** If true, the macro only navigates + reads prices and never places orders. */
     public boolean dryRun = true;
 
