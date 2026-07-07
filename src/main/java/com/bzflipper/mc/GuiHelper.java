@@ -104,23 +104,32 @@ public final class GuiHelper {
         return findSlotExact(mc, needle) >= 0;
     }
 
-    /** True if a slot's name matches {@code needle} ignoring case/punctuation/symbols
-     *  (e.g. "☘ Fine Peridot Gemstone" matches "Fine Peridot Gemstone"). */
-    public static boolean hasNormItemNamed(MinecraftClient mc, String needle) {
+    /** First slot whose name matches {@code needle} ignoring case/punctuation/
+     *  symbols ("☘ Fine Peridot Gemstone" matches "Fine Peridot Gemstone"), or -1. */
+    public static int findSlotNorm(MinecraftClient mc, String needle) {
         GenericContainerScreenHandler chest = openChest(mc);
-        if (chest == null) return false;
+        if (chest == null) return -1;
         String n = com.bzflipper.core.Keys.norm(needle);
-        if (n.isEmpty()) return false;
+        if (n.isEmpty()) return -1;
         int count = chestSlotCount(chest);
         for (int i = 0; i < count; i++) {
-            if (com.bzflipper.core.Keys.norm(name(chest.getSlot(i).getStack())).equals(n)) return true;
+            if (com.bzflipper.core.Keys.norm(name(chest.getSlot(i).getStack())).equals(n)) return i;
         }
-        return false;
+        return -1;
     }
 
-    /** Click the exact-named slot; fall back to a substring match. True if clicked. */
+    /** True if a slot's name matches {@code needle} ignoring case/punctuation/symbols. */
+    public static boolean hasNormItemNamed(MinecraftClient mc, String needle) {
+        return findSlotNorm(mc, needle) >= 0;
+    }
+
+    /** Click the best-matching slot: exact name → normalized (symbol-prefix
+     *  tolerant) → substring. The normalized tier stops a symbol-prefixed item
+     *  ("☘ Fine Peridot Gemstone") from losing to a similarly-named longer item
+     *  that a bare substring match would hit first. True if clicked. */
     public static boolean clickExactName(MinecraftClient mc, String needle) {
         int idx = findSlotExact(mc, needle);
+        if (idx < 0) idx = findSlotNorm(mc, needle);
         if (idx < 0) idx = findSlotByName(mc, needle);
         return idx >= 0 && clickSlotIndex(mc, idx);
     }

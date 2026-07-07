@@ -72,6 +72,14 @@ public class BazaarMacro {
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
 
+    /** Is this item already queued for sale? KEY-based — the same item can arrive
+     *  under differently-formatted names (grid vs API vs inventory sweep), and an
+     *  exact-string contains() would queue it twice. */
+    private boolean queuedForSell(String item) {
+        String k = key(item);
+        return pendingSells.stream().anyMatch(s -> key(s).equals(k));
+    }
+
     private final FlipConfig config;
     private final BazaarApi api;
     private final ProfitTracker tracker;
@@ -248,7 +256,11 @@ public class BazaarMacro {
             if (s.boughtItems != null) boughtItems.addAll(s.boughtItems);
             if (s.efficiency != null) efficiency.putAll(s.efficiency);
             if (s.itemProfit != null) itemProfit.putAll(s.itemProfit);
-            if (s.fillRate != null) fillRate.putAll(s.fillRate);
+            // Drop poisoned rates from the old per-pass sampling bug (rates decayed
+            // to ~0, ranking those items dead-last forever) — remeasure instead.
+            if (s.fillRate != null) s.fillRate.forEach((k, v) -> {
+                if (v != null && v >= 1.0) fillRate.put(k, v);
+            });
             allTimeProfit = s.allTimeProfit;
             System.out.println("[bzflipper] restored state: " + orders.size()
                     + " orders, " + pendingSells.size() + " pending sells");
@@ -300,6 +312,7 @@ public class BazaarMacro {
         inventoryFull = false;
         stashPending = false;
         nextCookieCheck = System.currentTimeMillis() + 30_000L;   // check shortly after start
+        lastManageRefresh = System.currentTimeMillis();   // grid is fresh at start — no bounce
         resetDelay();
 
         GuiDump.reset();
@@ -403,7 +416,10 @@ public class BazaarMacro {
         // Stash pickup must NOT happen inside a GUI ("You cannot pick these items
         // up while in an inventory."). Close the bazaar first, then run the command.
         if (phase == Phase.PICKUP_STASH) {
-            if (GuiHelper.openChest(mc) != null) { mc.setScreen(null); return; }
+            // closeHandledScreen (NOT setScreen(null)) — it sends the close packet,
+            // otherwise the server still thinks a container is open and rejects
+            // /pickupstash with "cannot pick these items up while in an inventory".
+            if (GuiHelper.openChest(mc) != null) { mc.player.closeHandledScreen(); return; }
             var nh = mc.getNetworkHandler();
             if (nh != null) { nh.sendChatCommand("pickupstash"); log("recovering stashed materials (/pickupstash)"); }
             stashPending = false;
@@ -416,7 +432,10 @@ public class BazaarMacro {
         if (phase == Phase.COOKIE_CHECK) { pCookieCheck(mc); return; }
         if (phase == Phase.COOKIE_USE)   { pCookieUse(mc); return; }
 
-        if (GuiHelper.openChest(mc) == null) {
+        // While a sign popup is pending, the chest may close a moment before the
+        // sign opens — do NOT fire /bz into that gap (it cancels the sign).
+        // The WAIT_SIGN case below times out if the sign truly never arrives.
+        if (GuiHelper.openChest(mc) == null && phase != Phase.WAIT_SIGN) {
             openBazaar(mc);
             return;
         }
@@ -427,7 +446,17 @@ public class BazaarMacro {
         switch (phase) {
             case PLAN         -> pPlan(mc);
             case NAV_SEARCH   -> pNavSearch(mc);
-            case WAIT_SIGN    -> statusLine = "waiting for sign…";
+            case WAIT_SIGN    -> {
+                statusLine = "waiting for sign…";
+                // checkStuck ignores WAIT_SIGN, so time out here: if the sign
+                // never opens (lag / dropped packet), recover instead of hanging.
+                if (++signWaitTicks > STUCK_LIMIT) {
+                    signWaitTicks = 0;
+                    pendingSignText = null;
+                    log("§esign never opened — recovering");
+                    phase = Phase.PLAN;
+                }
+            }
             case BUY_OPEN     -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BUY_ORDER)) phase = Phase.BUY_AMOUNT; }
             case BUY_AMOUNT   -> pBuyAmount(mc);
             case BUY_PRICE    -> pBuyPrice(mc);
@@ -476,21 +505,6 @@ public class BazaarMacro {
         boolean slotFree = grid.size() < orderLimit;                       // 14/21/28
         boolean dailyOk = System.currentTimeMillis() >= dailyLimitUntil;   // daily coin limit
 
-        // Hypixel only updates fill % / "Click to claim!" when the Manage grid is
-        // RE-OPENED. If nothing is claimable in the current (possibly stale) view,
-        // force a genuine reopen on a timer so newly-filled orders surface and get
-        // claimed — freeing a slot. Placed UP FRONT so a busy relist/merge pass can
-        // never starve it (that's why it used to need a manual refresh), skipped
-        // when something's already claimable so it never delays a real claim, and
-        // it falls back to /bz if the "Go Back" button isn't found.
-        if (grid.stream().noneMatch(ParsedOrder::claimable)
-                && System.currentTimeMillis() - lastManageRefresh > config.manageRefreshSeconds * 1000L) {
-            lastManageRefresh = System.currentTimeMillis();
-            statusLine = "refreshing orders…";
-            if (!GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK)) openBazaar(mc);
-            return;   // reopens fresh via goToManage next pass
-        }
-
         // 0) Booster Cookie upkeep (rare — every cookieCheckHours).
         if (config.autoCookie && !config.dryRun
                 && System.currentTimeMillis() >= nextCookieCheck) {
@@ -527,12 +541,32 @@ public class BazaarMacro {
                     continue;
                 }
             }
+            // The grid updates async after a claim click — don't re-click the same
+            // item while stale data still shows it claimable (double-claiming
+            // double-books the fill).
+            if (key(o.item()).equals(lastClaimKey)
+                    && System.currentTimeMillis() - lastClaimAt < 4_000) continue;
             statusLine = "claiming " + (o.buy() ? "bought " : "sold ") + o.item();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) {
+                lastClaimKey = key(o.item());
+                lastClaimAt = System.currentTimeMillis();
                 if (o.buy()) onBuyClaimed(o);
                 else onSellClaimed(o, grid);
             }
             return; // one action per pass
+        }
+
+        // 1.2) Hypixel only updates fill % / "Click to claim!" when the Manage
+        //      grid is RE-OPENED. Nothing actionable was claimed above, so on a
+        //      timer force a genuine reopen so fresh fills surface and free their
+        //      slots. Sits right after CLAIM: a real claim is never delayed, and
+        //      a busy relist/merge pass below can never starve it (the old
+        //      bottom-of-pass placement is why fills needed a manual refresh).
+        if (System.currentTimeMillis() - lastManageRefresh > config.manageRefreshSeconds * 1000L) {
+            lastManageRefresh = System.currentTimeMillis();
+            statusLine = "refreshing orders…";
+            if (!GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK)) openBazaar(mc);
+            return;   // reopens fresh via goToManage next pass
         }
 
         // 1.5) Dump bail-out goods via Sell Instantly (guaranteed exit).
@@ -570,7 +604,7 @@ public class BazaarMacro {
                 ParsedOrder tc = offs.get(0);
                 statusLine = "merging sell offers: " + mergingItem;
                 cancelIsBuy = false; cancelRebuy = false; cancelBailInstasell = false; cancelSilent = false;
-                cancelItem = tc.item(); cancelAmount = tc.amount();
+                cancelItem = tc.item(); cancelAmount = remainingUnits(tc);
                 if (GuiHelper.clickSlotIndex(mc, tc.slot())) { markCancelled(tc.item()); phase = Phase.CANCEL; }
                 return;
             }
@@ -685,7 +719,7 @@ public class BazaarMacro {
             cancelBailInstasell = !o.buy() && relists > config.maxRelistsPerOrder;
             cancelSilent = false;
             cancelItem = o.item();
-            cancelAmount = o.amount();
+            cancelAmount = o.buy() ? o.amount() : remainingUnits(o);
             if (GuiHelper.clickSlotIndex(mc, o.slot())) { markCancelled(o.item()); phase = Phase.CANCEL; }
             return;
         }
@@ -712,7 +746,7 @@ public class BazaarMacro {
                 note(String.format(Locale.ROOT, "§erecycling %s (stuck %dm, exit loss %.1f%%)",
                         o.item(), (tNow - oi.placedAt) / 60_000, lossFrac * 100));
                 cancelIsBuy = false; cancelRebuy = false; cancelBailInstasell = true; cancelSilent = false;
-                cancelItem = o.item(); cancelAmount = o.amount();
+                cancelItem = o.item(); cancelAmount = remainingUnits(o);
                 if (GuiHelper.clickSlotIndex(mc, o.slot())) { markCancelled(o.item()); phase = Phase.CANCEL; }
                 return;
             }
@@ -806,10 +840,23 @@ public class BazaarMacro {
         return GuiHelper.freeInventorySlots(mc) >= needed + 1;   // +1 slot safety
     }
 
+    /** Units still UNSOLD in an order — what a cancel actually refunds. Using the
+     *  full original amount would overstate instasell profit/loss and pending
+     *  sell quantities on partially-filled offers. */
+    private static int remainingUnits(ParsedOrder o) {
+        return Math.max(1, o.amount()
+                - (int) Math.floor(o.amount() * Math.min(100.0, o.filledPct()) / 100.0));
+    }
+
     // Per-item cancel cooldown: a cancel takes a moment to reflect in the grid;
     // without this the same offer gets cancel-clicked twice.
     private String lastCancelKey = null;
     private long lastCancelAt = 0;
+
+    // Same idea for claims: the slot stays "claimable" in the stale grid for a
+    // moment after we claim it — re-clicking would double-book the fill.
+    private String lastClaimKey = null;
+    private long lastClaimAt = 0;
 
     private boolean recentlyCancelled(String item) {
         return key(item).equals(lastCancelKey)
@@ -840,6 +887,9 @@ public class BazaarMacro {
     private void sweepLeftovers(Set<String> invNames, List<ParsedOrder> grid) {
         for (String name : invNames) {
             String k = key(name);
+            // Never auto-sell a Booster Cookie — it was bought to CONSUME; if the
+            // consume flow aborts partway, selling it back would eat the spread.
+            if (k.equals(key(BazaarStrings.ITEM_COOKIE))) continue;
             // Sell items we bought, plus (optionally) any other bazaar-sellable item
             // found in inventory — but never personal/non-bazaar items.
             boolean ours = boughtItems.contains(k);
@@ -906,7 +956,7 @@ public class BazaarMacro {
         oi.claimedSoFar = Math.min(Math.max(o.amount(), 1), oi.claimedSoFar + newUnits);
 
         buysFilled++;
-        if (!pendingSells.contains(o.item())) pendingSells.addLast(o.item());
+        if (!queuedForSell(o.item())) pendingSells.addLast(o.item());
         pendingSellAmounts.merge(o.key(), newUnits, Integer::sum);
         log("claimed " + newUnits + "× " + o.item()
                 + (o.filled() ? "" : String.format(Locale.ROOT, " (%.0f%% filled)", o.filledPct()))
@@ -924,11 +974,14 @@ public class BazaarMacro {
         int estSold = o.filled() ? total : (int) Math.floor(total * o.filledPct() / 100.0);
         int prevSold = oi != null ? oi.soldSoFar : 0;
         int newSold = Math.max(0, estSold - prevSold);
-        if (newSold == 0) newSold = Math.max(1, total - prevSold);   // claimable but % unreadable
+        // Fallback ONLY when the fill % was unreadable (estSold==0 despite being
+        // claimable) — never when it's readable and simply shows no NEW units
+        // (e.g. a duplicate claim on stale grid data would book phantom profit).
+        if (newSold == 0 && estSold == 0) newSold = Math.max(1, total - prevSold);
         if (oi != null) oi.soldSoFar = prevSold + newSold;
 
         sellsFilled++;
-        if (!Double.isNaN(buyP) && !Double.isNaN(sellP)) {
+        if (!Double.isNaN(buyP) && !Double.isNaN(sellP) && newSold > 0) {
             double profit = (sellP * (1.0 - config.taxFraction) - buyP) * newSold;
             tracker.addProfit(profit);
             allTimeProfit += profit;
@@ -949,7 +1002,7 @@ public class BazaarMacro {
             }
             log(String.format(Locale.ROOT, "§asold§r %d× %s  %+,.0f coins  (session %,.0f)",
                     newSold, o.item(), profit, tracker.total()));
-        } else {
+        } else if (newSold > 0) {
             log("claimed sold " + o.item() + " (buy price unknown — profit not tracked)");
         }
 
@@ -992,6 +1045,13 @@ public class BazaarMacro {
         return Math.min(even, cap);
     }
 
+    /** Minimum window between fill-rate samples. Sampling every pass (~250ms)
+     *  poisoned the EMA: most passes see 0 new fills, so rate=0 was merged in
+     *  4×/second, decaying every listed item's measured rate to ~0 within
+     *  seconds — which then ranked it dead-last forever. Sample over a real
+     *  window instead so the rate reflects actual throughput. */
+    private static final long FILL_WINDOW_MS = 60_000;
+
     /** Measure how fast our SELL offers actually fill (units/hr), EMA per item.
      *  This is the ground-truth throughput the ranker uses instead of the book snapshot. */
     private void observeFills(List<ParsedOrder> grid) {
@@ -999,12 +1059,13 @@ public class BazaarMacro {
         for (ParsedOrder o : grid) {
             if (o.buy()) continue;   // sell throughput is what turns capital over
             double filled = o.amount() * Math.min(100.0, o.filledPct()) / 100.0;
-            double[] prev = fillObs.put(o.key(), new double[]{now, filled});
-            if (prev == null) continue;
-            double dtHr = (now - prev[0]) / 3_600_000.0;
+            double[] prev = fillObs.get(o.key());
+            if (prev == null) { fillObs.put(o.key(), new double[]{now, filled}); continue; }
             double dFilled = filled - prev[1];
-            if (dtHr < 1e-4 || dFilled < 0) continue;   // new offer / reset — skip this sample
-            double rate = dFilled / dtHr;               // units per hour
+            if (dFilled < 0) { fillObs.put(o.key(), new double[]{now, filled}); continue; }  // relisted — new baseline
+            if (now - prev[0] < FILL_WINDOW_MS) continue;   // window not elapsed — keep accumulating
+            fillObs.put(o.key(), new double[]{now, filled});
+            double rate = dFilled / ((now - prev[0]) / 3_600_000.0);   // units per hour
             fillRate.merge(o.key(), rate, (old, r) -> 0.75 * old + 0.25 * r);
             stateDirty = true;
         }
@@ -1336,7 +1397,7 @@ public class BazaarMacro {
             } else {
                 // Unsold units return to the inventory — queue them (merged with
                 // any newly claimed units) to be listed as ONE fresh offer.
-                if (!pendingSells.contains(cancelItem)) pendingSells.addLast(cancelItem);
+                if (!queuedForSell(cancelItem)) pendingSells.addLast(cancelItem);
                 pendingSellAmounts.merge(key, Math.max(0, cancelAmount), Integer::sum);
                 log("relisting sell: " + cancelItem);
                 phase = Phase.PLAN;
@@ -1512,7 +1573,14 @@ public class BazaarMacro {
                 GuiHelper.clickByName(mc, BazaarStrings.BTN_MANAGE_ALT);
             }
         } else {
-            GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK);
+            // Escape whatever screen this is. Some (e.g. confirm pages) have no
+            // "Go Back" — try Close/Cancel, then hard-reset via /bz so PLAN can
+            // never wedge here (checkStuck deliberately ignores PLAN).
+            if (!GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK)
+                    && !GuiHelper.clickByName(mc, "close")
+                    && !GuiHelper.clickByName(mc, "cancel")) {
+                openBazaar(mc);
+            }
         }
         return false;
     }
@@ -1546,8 +1614,10 @@ public class BazaarMacro {
         }
     }
 
+    private int signWaitTicks = 0;
+
     private void requestSign(String text, Phase next) {
-        pendingSignText = text; phaseAfterSign = next; phase = Phase.WAIT_SIGN;
+        pendingSignText = text; phaseAfterSign = next; signWaitTicks = 0; phase = Phase.WAIT_SIGN;
     }
 
     private void checkStuck() {
@@ -1555,6 +1625,15 @@ public class BazaarMacro {
         if (phase == lastPhase && !waiting) {
             if (++stuckTicks > STUCK_LIMIT) {
                 log("stuck in " + phase + " — recovering");
+                // A BUY-side navigation dead-end (page never loads, unreachable
+                // item) would re-pick the same item and loop forever — bench it.
+                // Sell-side navs must keep retrying: we're holding the goods.
+                if (phase == Phase.NAV_SEARCH && navAfter == Phase.BUY_OPEN && navItem != null) {
+                    blacklistUntil.put(key(navItem),
+                            System.currentTimeMillis() + config.blacklistMinutes * 60_000L);
+                    note("§ecouldn't reach " + navItem + " — benched " + config.blacklistMinutes + "m");
+                }
+                activeItem = null;
                 GuiHelper.clickByName(MinecraftClient.getInstance(), BazaarStrings.BTN_GO_BACK);
                 phase = Phase.PLAN;
                 stuckTicks = 0;
