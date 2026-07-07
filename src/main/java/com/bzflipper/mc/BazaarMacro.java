@@ -60,6 +60,7 @@ public class BazaarMacro {
     private Object lastWorld = null;         // detect world change (rejoin)
     private long lastManageRefresh = 0;      // periodic Manage re-open to catch new fills
     private final Map<String, Long> firstClaimable = new HashMap<>();  // stall-grace timing
+    private final Map<String, Integer> claimReadyMark = new HashMap<>();  // last-seen claimable count (progress detection)
     private String mergingItem = null;       // item whose duplicate sell offers we're combining
     private boolean inventoryFull = false;   // server said "no space" → sell before claiming
     private boolean stashPending = false;    // materials went to the stash → recover them
@@ -534,8 +535,20 @@ public class BazaarMacro {
                 int ready = o.claimAmount() > 0 ? o.claimAmount()
                         : (int) Math.floor(o.amount() * o.filledPct() / 100.0);
                 boolean small = o.amount() <= config.minClaimUnits;
-                long firstSeen = firstClaimable.computeIfAbsent(o.key(), k -> System.currentTimeMillis());
-                boolean stalled = System.currentTimeMillis() - firstSeen > config.claimGraceSeconds * 1000L;
+                // PROGRESS-AWARE stall grace: the timer means "no NEW fills for
+                // claimGraceSeconds", not "N seconds since first claimable". A
+                // still-filling order keeps resetting the clock, so slow trickle
+                // fills batch up to minClaimUnits instead of being claimed 3 at a
+                // time; only a genuinely STOPPED partial is claimed early so it
+                // isn't stranded below the threshold.
+                long nowMs = System.currentTimeMillis();
+                int prevReady = claimReadyMark.getOrDefault(o.key(), -1);
+                if (prevReady < 0 || ready > prevReady) {
+                    firstClaimable.put(o.key(), nowMs);      // new fills → restart the grace clock
+                    claimReadyMark.put(o.key(), ready);
+                }
+                long firstSeen = firstClaimable.getOrDefault(o.key(), nowMs);
+                boolean stalled = nowMs - firstSeen > config.claimGraceSeconds * 1000L;
                 if (!o.filled() && !small && !stalled && ready < config.minClaimUnits) {
                     statusLine = "waiting for " + config.minClaimUnits + "× " + o.item() + " (" + ready + " ready)";
                     continue;
@@ -970,6 +983,7 @@ public class BazaarMacro {
         if (oi.name == null || oi.name.isEmpty()) oi.name = o.item();
         boughtItems.add(o.key());
         firstClaimable.remove(o.key());   // restart batching grace for the next fill
+        claimReadyMark.remove(o.key());   // and its progress marker
         stateDirty = true;
         if (Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
         if (oi.amount <= 0) oi.amount = o.amount();
