@@ -57,6 +57,7 @@ public class BazaarMacro {
     private long dailyLimitUntil = 0;       // pause new orders until this time
     private boolean serverClosing = false;  // Hypixel restart in progress → pause
     private Object lastWorld = null;         // detect world change (rejoin)
+    private boolean inventoryFull = false;   // server said "no space" → sell before claiming
 
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
@@ -168,6 +169,9 @@ public class BazaarMacro {
         } else if (m.contains("about to restart") || m.contains("server is restarting")
                 || m.contains("server closing") || m.contains("restarting in")) {
             if (!serverClosing) { serverClosing = true; saveState(); note("§eserver restarting — pausing"); }
+        } else if (m.contains("space required to claim") || m.contains("don't have the space")
+                || m.contains("inventory is full")) {
+            if (!inventoryFull) { inventoryFull = true; note("§einventory full — selling to free space before claiming"); }
         }
     }
 
@@ -244,6 +248,7 @@ public class BazaarMacro {
         stuckTicks = 0;
         openCooldown = 0;
         serverClosing = false;
+        inventoryFull = false;
         resetDelay();
 
         GuiDump.reset();
@@ -534,6 +539,7 @@ public class BazaarMacro {
                 || lower.endsWith("essence") || lower.endsWith("shard")) {
             return true;   // goes to storage, not the inventory
         }
+        if (inventoryFull) return false;   // server told us it's full — don't retry until we sell
         int stack = tag != null ? ItemNames.stackSize(tag) : 64;
         int amount = o.claimAmount() > 0 ? o.claimAmount() : stack;
         int needed = Math.max(1, (int) Math.ceil(amount / (double) stack));
@@ -877,6 +883,7 @@ public class BazaarMacro {
         if (oi.amount <= 0) oi.amount = activeAmount;
         ordersPlaced++;
         stateDirty = true;
+        inventoryFull = false;   // listing a sell offer moved items out of inventory → space freed
         pendingSells.removeFirstOccurrence(activeItem);
         pendingSellAmounts.remove(key);
         log(String.format(Locale.ROOT, "§6sell§r %s @ %.1f", activeItem, ourSellPrice));
@@ -950,6 +957,7 @@ public class BazaarMacro {
             relistCounts.remove(key);
             blacklistUntil.put(key, System.currentTimeMillis()
                     + config.blacklistMinutes * 60_000L);
+            inventoryFull = false;   // instasell emptied those items from inventory
             pendingInstasell = null;
             activeItem = null;
             phase = Phase.PLAN;
