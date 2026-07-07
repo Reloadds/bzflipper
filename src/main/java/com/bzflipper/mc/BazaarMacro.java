@@ -476,6 +476,21 @@ public class BazaarMacro {
         boolean slotFree = grid.size() < orderLimit;                       // 14/21/28
         boolean dailyOk = System.currentTimeMillis() >= dailyLimitUntil;   // daily coin limit
 
+        // Hypixel only updates fill % / "Click to claim!" when the Manage grid is
+        // RE-OPENED. If nothing is claimable in the current (possibly stale) view,
+        // force a genuine reopen on a timer so newly-filled orders surface and get
+        // claimed — freeing a slot. Placed UP FRONT so a busy relist/merge pass can
+        // never starve it (that's why it used to need a manual refresh), skipped
+        // when something's already claimable so it never delays a real claim, and
+        // it falls back to /bz if the "Go Back" button isn't found.
+        if (grid.stream().noneMatch(ParsedOrder::claimable)
+                && System.currentTimeMillis() - lastManageRefresh > config.manageRefreshSeconds * 1000L) {
+            lastManageRefresh = System.currentTimeMillis();
+            statusLine = "refreshing orders…";
+            if (!GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK)) openBazaar(mc);
+            return;   // reopens fresh via goToManage next pass
+        }
+
         // 0) Booster Cookie upkeep (rare — every cookieCheckHours).
         if (config.autoCookie && !config.dryRun
                 && System.currentTimeMillis() >= nextCookieCheck) {
@@ -756,15 +771,8 @@ public class BazaarMacro {
                 return;
             }
         }
-        // Nothing to do — but Hypixel only updates order fill % when the Manage
-        // screen is re-opened. Periodically bounce out and back so fresh fills
-        // register (fixes "orders don't show filled until you refresh").
-        if (System.currentTimeMillis() - lastManageRefresh > config.manageRefreshSeconds * 1000L) {
-            lastManageRefresh = System.currentTimeMillis();
-            GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK);   // goToManage reopens it fresh next pass
-            statusLine = "refreshing orders…";
-            return;
-        }
+        // (Periodic Manage refresh now runs up front, before the claim/relist
+        //  steps, so it can't be starved by a busy pass — see top of pPlan.)
         statusLine = String.format(Locale.ROOT, "monitoring %dB/%dS — %s",
                 buyCount, sellCount, idleReason());
     }
