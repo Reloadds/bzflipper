@@ -1097,6 +1097,23 @@ public class BazaarMacro {
 
     // ---- helpers ----
 
+    /** Unrealized profit locked in open SELL offers — what we'd bank if every
+     *  current offer filled (unsold portion × (sell·(1−tax) − buy)). */
+    public double projectedProfit() {
+        double sum = 0;
+        for (ParsedOrder o : lastOrders) {
+            if (o.buy()) continue;
+            OrderInfo oi = orders.get(o.key());
+            if (oi == null || Double.isNaN(oi.buyPrice)) continue;
+            double sellP = !Double.isNaN(o.pricePerUnit()) ? o.pricePerUnit() : oi.sellPrice;
+            if (Double.isNaN(sellP)) continue;
+            int remaining = Math.max(0,
+                    (int) Math.round(o.amount() * (1 - Math.min(100.0, o.filledPct()) / 100.0)));
+            sum += (sellP * (1 - config.taxFraction) - oi.buyPrice) * remaining;
+        }
+        return sum;
+    }
+
     private void updateTopCandidate() {
         var cs = api.getCandidates();
         if (!cs.isEmpty()) {

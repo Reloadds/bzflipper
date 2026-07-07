@@ -39,7 +39,7 @@ public class Overlay {
 
         ProfitTracker t = macro.getTracker();
         List<ParsedOrder> ords = macro.lastOrders;
-        int rows = 6 + (ords.isEmpty() ? 0 : ords.size() + 1);
+        int rows = 7 + (ords.isEmpty() ? 0 : ords.size() + 1);
         int x = 6, y = 6;
         int h = rows * LINE + PAD * 2;
 
@@ -68,6 +68,12 @@ public class Overlay {
                 coins(t.total()), coins(macro.allTimeProfit),
                 macro.flipsCompleted, macro.buysFilled, macro.sellsFilled),
                 x + 2, ly, GREY);
+        ly += LINE;
+
+        double pending = macro.projectedProfit();
+        draw(ctx, mc, String.format(Locale.ROOT, "§ain offers %s%s§7  ·  proj %s/hr",
+                pending >= 0 ? "+" : "", coins(pending), coins(t.sessionPerHour(pending))),
+                x + 2, ly, WHITE);
         ly += LINE;
 
         draw(ctx, mc, "top: " + macro.topCandidate, x + 2, ly, GREY);
