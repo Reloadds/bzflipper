@@ -596,9 +596,9 @@ public class BazaarMacro {
                 Map<String, ParsedOrder> m = o.buy() ? firstBuy : firstSell;
                 ParsedOrder prev = m.putIfAbsent(o.key(), o);
                 if (prev == null) continue;
-                // Only de-dup BUY orders (they waste order slots + split queue).
-                // Multiple SELL offers per item are fine — they all sell — and
-                // merging them means cancelling (refund → stash risk) for no gain.
+                // Only de-dup BUY orders here (they waste slots + split queue).
+                // Duplicate SELL offers are consolidated into one by step 1.55
+                // above (cancel all → refund → relist as a single combined offer).
                 if (!o.buy()) continue;
                 if (o.claimable() || prev.claimable()) continue;  // claim first, merge later
                 if (config.dryRun) { note("DRY: would merge duplicate orders of " + o.item()); continue; }
@@ -781,9 +781,16 @@ public class BazaarMacro {
      * Never cancel a sell offer unless the refund fits in free inventory space.
      */
     private boolean refundFits(MinecraftClient mc, ParsedOrder sellOrder) {
-        if (inventoryFull) return false;
         FlipCandidate q = api.quote(sellOrder.item());
         String tag = q != null ? q.tag : null;
+        // Essence/shards refund to storage, not the inventory — they always fit, so
+        // their sell offers can be merged/relisted regardless of free slots.
+        String lower = sellOrder.item().toLowerCase(Locale.ROOT);
+        if ((tag != null && ItemNames.bypassesInventory(tag))
+                || lower.endsWith("essence") || lower.endsWith("shard")) {
+            return true;
+        }
+        if (inventoryFull) return false;
         int stack = tag != null ? ItemNames.stackSize(tag) : 64;
         int remaining = Math.max(1, sellOrder.amount()
                 - (int) Math.floor(sellOrder.amount() * sellOrder.filledPct() / 100.0));
