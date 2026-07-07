@@ -42,6 +42,14 @@ public final class BazaarStrings {
     public static final String BTN_SPREAD_BUY   = "5% of spread";   // aggressive queue-jump (buy)
     public static final String BTN_SPREAD_SELL  = "10% of spread";  // aggressive queue-jump (sell)
     public static final String BTN_INSTASELL    = "sell instantly"; // guaranteed immediate exit
+    public static final String BTN_INSTABUY     = "buy instantly";  // immediate purchase (cookie)
+
+    // --- Booster Cookie automation ---
+    public static final String TITLE_SBMENU     = "skyblock menu";
+    public static final String ITEM_COOKIE      = "booster cookie";
+    public static final String LORE_DURATION    = "duration";
+    public static final String LORE_NOT_ACTIVE  = "not active";
+    public static final String BTN_CONSUME      = "consume";
 
     // On the "Confirm Buy Order" / "Confirm Sell Offer" screen, the submit button
     // is named "Buy Order" / "Sell Offer" with this in its lore ("Click to submit order!").

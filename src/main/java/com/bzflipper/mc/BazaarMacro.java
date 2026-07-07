@@ -44,7 +44,8 @@ public class BazaarMacro {
         IDLE, PLAN, NAV_SEARCH, WAIT_SIGN,
         BUY_OPEN, BUY_AMOUNT, BUY_PRICE, BUY_CONFIRM,
         SELL_OPEN, SELL_AMOUNT, SELL_PRICE, SELL_CONFIRM,
-        SELL_INSTANT, CANCEL, PICKUP_STASH
+        SELL_INSTANT, CANCEL, PICKUP_STASH,
+        COOKIE_CHECK, COOKIE_INSTABUY, COOKIE_AMOUNT, COOKIE_MOVE, COOKIE_USE, COOKIE_CONFIRM
     }
 
     private static final int STUCK_LIMIT = 40;
@@ -59,6 +60,11 @@ public class BazaarMacro {
     private Object lastWorld = null;         // detect world change (rejoin)
     private boolean inventoryFull = false;   // server said "no space" → sell before claiming
     private boolean stashPending = false;    // materials went to the stash → recover them
+
+    // Booster Cookie automation.
+    private long nextCookieCheck = 0;
+    private int cookieCmdCooldown = 0;
+    public volatile String cookieStatus = "?";
 
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
@@ -178,6 +184,11 @@ public class BazaarMacro {
         } else if (m.contains("space required to claim") || m.contains("don't have the space")
                 || m.contains("inventory is full")) {
             if (!inventoryFull) { inventoryFull = true; note("§einventory full — selling to free space before claiming"); }
+        } else if (m.contains("consumed") && m.contains("booster cookie")) {
+            note("§acookie consumed — buff renewed!");
+            cookieStatus = "~4d";
+            nextCookieCheck = System.currentTimeMillis() + 10 * 60_000L;   // verify soon
+            if (phase == Phase.COOKIE_CONFIRM || phase == Phase.COOKIE_USE) phase = Phase.PLAN;
         } else if (m.contains("stashed away")) {
             // A claim overflowed into the stash — stop claiming, sell, then recover.
             inventoryFull = true;
@@ -263,6 +274,7 @@ public class BazaarMacro {
         serverClosing = false;
         inventoryFull = false;
         stashPending = false;
+        nextCookieCheck = System.currentTimeMillis() + 30_000L;   // check shortly after start
         resetDelay();
 
         GuiDump.reset();
@@ -329,6 +341,11 @@ public class BazaarMacro {
             return;
         }
 
+        // Cookie check needs the SkyBlock Menu (/sbmenu), and consuming needs the
+        // GUI CLOSED — both handled here, outside the open-bazaar flow.
+        if (phase == Phase.COOKIE_CHECK) { pCookieCheck(mc); return; }
+        if (phase == Phase.COOKIE_USE)   { pCookieUse(mc); return; }
+
         if (GuiHelper.openChest(mc) == null) {
             openBazaar(mc);
             return;
@@ -354,6 +371,11 @@ public class BazaarMacro {
             case SELL_INSTANT -> pInstasell(mc);
             case CANCEL       -> pCancel(mc);
             case PICKUP_STASH -> { /* handled before the openChest check */ }
+            case COOKIE_INSTABUY -> pCookieInstabuy(mc);
+            case COOKIE_AMOUNT   -> pCookieAmount(mc);
+            case COOKIE_MOVE     -> pCookieMove(mc);
+            case COOKIE_CONFIRM  -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CONSUME)) { nextCookieCheck = System.currentTimeMillis() + 10 * 60_000L; phase = Phase.PLAN; } }
+            case COOKIE_CHECK, COOKIE_USE -> { /* handled before the openChest check */ }
             case IDLE         -> { }
         }
         saveStateIfDue();
@@ -377,6 +399,13 @@ public class BazaarMacro {
 
         boolean slotFree = grid.size() < orderLimit;                       // 14/21/28
         boolean dailyOk = System.currentTimeMillis() >= dailyLimitUntil;   // daily coin limit
+
+        // 0) Booster Cookie upkeep (rare — every cookieCheckHours).
+        if (config.autoCookie && !config.dryRun
+                && System.currentTimeMillis() >= nextCookieCheck) {
+            phase = Phase.COOKIE_CHECK;
+            return;
+        }
 
         // 1) Claim goods/coins the moment they're claimable — Hypixel marks an
         //    order "Click to claim!" as soon as ANY of it fills, so this claims
@@ -714,6 +743,13 @@ public class BazaarMacro {
                 double ratio = Math.max(0, Math.min(2.0, realizedMargin / oi.quotedMargin));
                 efficiency.merge(o.key(), ratio, (old, r) -> 0.7 * old + 0.3 * r);   // EMA
             }
+            // A losing flip = bad item right now — bench it for a while.
+            if (profit < 0) {
+                blacklistUntil.put(o.key(), System.currentTimeMillis()
+                        + config.badItemBlacklistMinutes * 60_000L);
+                note("§elost coins on " + o.item() + " — benched "
+                        + config.badItemBlacklistMinutes + "m");
+            }
             log(String.format(Locale.ROOT, "§asold§r %d× %s  %+,.0f coins  (session %,.0f)",
                     newSold, o.item(), profit, tracker.total()));
         } else {
@@ -773,8 +809,17 @@ public class BazaarMacro {
             for (FlipCandidate c : api.getCandidates()) {
                 String key = key(c.displayName);
                 if (held.contains(key)) continue;
-                if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // relist-war item
-                if (efficiency.getOrDefault(key, 1.0) < config.minEfficiency) continue; // chronically bad
+                if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // benched item
+                // Chronically-bad item (captures too little of its quoted margin):
+                // bench it TEMPORARILY with probation, not forever — markets change.
+                if (efficiency.getOrDefault(key, 1.0) < config.minEfficiency) {
+                    blacklistUntil.put(key, now + config.badItemBlacklistMinutes * 60_000L);
+                    efficiency.put(key, 0.8);   // probation: fresh chance after the bench
+                    note("§ebenched " + c.displayName + " " + config.badItemBlacklistMinutes
+                            + "m (low realized efficiency)");
+                    stateDirty = true;
+                    continue;
+                }
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
                 // Skip genuinely thin items (absolute floor, not purse-relative, so
                 // a bigger purse never reduces how many items qualify).
@@ -1065,6 +1110,115 @@ public class BazaarMacro {
                 phase = Phase.PLAN;
             }
         }
+    }
+
+    // ---- Booster Cookie automation ----
+    // The buff halves bazaar tax (1.25% → 1.1%) and lasts 4 days per cookie; we
+    // renew when remaining time drops under cookieRenewDays. Remaining time is
+    // read from the cookie item's lore in the SkyBlock Menu (/sbmenu).
+
+    private void pCookieCheck(MinecraftClient mc) {
+        statusLine = "checking cookie buff…";
+        var chest = GuiHelper.openChest(mc);
+        String title = GuiHelper.screenTitle(mc);
+        if (chest != null && title.contains(BazaarStrings.TITLE_SBMENU)) {
+            long remainMs = parseCookieRemaining(mc);
+            cookieStatus = remainMs < 0 ? "?" : fmtDuration(remainMs);
+            boolean needRenew = remainMs >= 0 && remainMs <= (long) (config.cookieRenewDays * 86_400_000L);
+            log("cookie buff: " + cookieStatus + (needRenew ? " — renewing" : ""));
+            if (!needRenew) {
+                nextCookieCheck = System.currentTimeMillis() + config.cookieCheckHours * 3_600_000L;
+                if (mc.player != null) mc.player.closeHandledScreen();
+                phase = Phase.PLAN;
+                return;
+            }
+            // Renew: already holding a cookie? consume it; else instabuy one first.
+            if (GuiHelper.findPlayerSlotByName(mc, BazaarStrings.ITEM_COOKIE) >= 0) {
+                phase = Phase.COOKIE_MOVE;
+            } else {
+                if (mc.player != null) mc.player.closeHandledScreen();
+                startNav("Booster Cookie", Phase.COOKIE_INSTABUY);
+            }
+            return;
+        }
+        if (chest != null) { if (mc.player != null) mc.player.closeHandledScreen(); return; }
+        if (cookieCmdCooldown > 0) { cookieCmdCooldown--; return; }
+        var nh = mc.getNetworkHandler();
+        if (nh != null) nh.sendChatCommand("sbmenu");
+        cookieCmdCooldown = 6;
+    }
+
+    /** Parse "duration: 3d 22h 17m" from the cookie lore; 0 if "not active"; -1 unknown. */
+    private long parseCookieRemaining(MinecraftClient mc) {
+        int idx = GuiHelper.findSlotByName(mc, BazaarStrings.ITEM_COOKIE);
+        if (idx < 0) return -1;
+        var chest = GuiHelper.openChest(mc);
+        if (chest == null) return -1;
+        for (String line : GuiHelper.lore(chest.getSlot(idx).getStack())) {
+            if (line.contains(BazaarStrings.LORE_NOT_ACTIVE)) return 0;
+            if (!line.contains(BazaarStrings.LORE_DURATION)) continue;
+            long ms = 0;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("(\\d+)\\s*([dhms])").matcher(line);
+            while (m.find()) {
+                long v = Long.parseLong(m.group(1));
+                switch (m.group(2)) {
+                    case "d" -> ms += v * 86_400_000L;
+                    case "h" -> ms += v * 3_600_000L;
+                    case "m" -> ms += v * 60_000L;
+                    case "s" -> ms += v * 1_000L;
+                }
+            }
+            return ms;
+        }
+        return -1;
+    }
+
+    private void pCookieInstabuy(MinecraftClient mc) {
+        statusLine = "buying booster cookie";
+        double price = GuiHelper.readCoinPrice(mc, BazaarStrings.BTN_INSTABUY, "per unit");
+        if (config.cookieMaxPrice > 0 && !Double.isNaN(price) && price > config.cookieMaxPrice) {
+            log(String.format(Locale.ROOT, "§ecookie too expensive (%,.0f > %,.0f) — retrying later",
+                    price, config.cookieMaxPrice));
+            nextCookieCheck = System.currentTimeMillis() + 3_600_000L;
+            phase = Phase.PLAN;
+            return;
+        }
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_INSTABUY)) phase = Phase.COOKIE_AMOUNT;
+    }
+
+    private void pCookieAmount(MinecraftClient mc) {
+        statusLine = "cookie amount: 1";
+        if (GuiHelper.findPlayerSlotByName(mc, BazaarStrings.ITEM_COOKIE) >= 0) {
+            phase = Phase.COOKIE_MOVE;   // purchase landed in inventory
+            return;
+        }
+        if (GuiHelper.clickByName(mc, "buy 1")) return;   // preset "Buy 1!"
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) requestSign("1", Phase.COOKIE_AMOUNT);
+    }
+
+    private void pCookieMove(MinecraftClient mc) {
+        statusLine = "moving cookie to hotbar";
+        int idx = GuiHelper.findPlayerSlotByName(mc, BazaarStrings.ITEM_COOKIE);
+        if (idx < 0) { phase = Phase.PLAN; return; }   // vanished? re-plan
+        if (GuiHelper.swapToHotbar(mc, idx, 8)) phase = Phase.COOKIE_USE;
+    }
+
+    private void pCookieUse(MinecraftClient mc) {
+        statusLine = "consuming cookie";
+        if (GuiHelper.openChest(mc) != null) {
+            if (mc.player != null) mc.player.closeHandledScreen();
+            return;
+        }
+        if (mc.player == null || mc.interactionManager == null) return;
+        mc.player.getInventory().setSelectedSlot(8);
+        mc.interactionManager.interactItem(mc.player, net.minecraft.util.Hand.MAIN_HAND);
+        phase = Phase.COOKIE_CONFIRM;   // confirm GUI opens; we click "consume"
+    }
+
+    private static String fmtDuration(long ms) {
+        long d = ms / 86_400_000L, h = (ms % 86_400_000L) / 3_600_000L;
+        return d > 0 ? d + "d" + h + "h" : h + "h" + ((ms % 3_600_000L) / 60_000L) + "m";
     }
 
     /** On the product page: click "Sell Instantly" — an immediate guaranteed exit. */

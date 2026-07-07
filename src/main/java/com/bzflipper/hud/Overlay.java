@@ -56,8 +56,8 @@ public class Overlay {
         ly += LINE;
 
         long age = macro.getApi().ageSeconds();
-        draw(ctx, mc, String.format(Locale.ROOT, "purse %s   api %s",
-                coins(macro.purse), age < 0 ? "…" : age + "s"), x + 2, ly, GREY);
+        draw(ctx, mc, String.format(Locale.ROOT, "purse %s   api %s   cookie %s",
+                coins(macro.purse), age < 0 ? "…" : age + "s", macro.cookieStatus), x + 2, ly, GREY);
         ly += LINE;
 
         draw(ctx, mc, String.format(Locale.ROOT, "§6%s/hr§7 now  ·  §6%s/hr§7 session",

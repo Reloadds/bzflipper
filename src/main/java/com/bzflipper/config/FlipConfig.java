@@ -147,6 +147,23 @@ public class FlipConfig {
     /** How long a relist-war item stays blacklisted (minutes). */
     public int blacklistMinutes = 30;
 
+    /** Bench time for items that lose money or capture too little of their quoted
+     *  margin — temporarily blacklisted, then given a fresh chance. */
+    public int badItemBlacklistMinutes = 45;
+
+    // ---- Booster Cookie automation ----
+    /** Keep the Booster Cookie buff alive automatically (it cuts bazaar tax). */
+    public boolean autoCookie = true;
+
+    /** Renew when remaining buff time drops to this many days. */
+    public double cookieRenewDays = 1.0;
+
+    /** Safety cap: never instabuy a cookie above this price (0 = no cap). */
+    public double cookieMaxPrice = 25_000_000;
+
+    /** Hours between cookie-buff checks. */
+    public int cookieCheckHours = 6;
+
     /** After this many relists on one item, price aggressively using the Bazaar's
      *  "5%/10% of spread" presets to jump the queue and end +0.1 wars. */
     public int aggressiveAfterRelists = 2;

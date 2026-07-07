@@ -259,6 +259,28 @@ public final class GuiHelper {
         return Double.NaN;
     }
 
+    /** First player-inventory slot (handler index) whose item name contains
+     *  {@code needle}, or -1. Searches only the player section of the open GUI. */
+    public static int findPlayerSlotByName(MinecraftClient mc, String needle) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return -1;
+        String n = needle.toLowerCase(Locale.ROOT);
+        int container = chestSlotCount(chest);
+        int total = chest.slots.size();
+        for (int i = container; i < total; i++) {
+            if (name(chest.getSlot(i).getStack()).contains(n)) return i;
+        }
+        return -1;
+    }
+
+    /** Swap a handler slot with a hotbar slot (0–8). True if the click was sent. */
+    public static boolean swapToHotbar(MinecraftClient mc, int slotIdx, int hotbarIdx) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null || mc.interactionManager == null || mc.player == null) return false;
+        mc.interactionManager.clickSlot(chest.syncId, slotIdx, hotbarIdx, SlotActionType.SWAP, mc.player);
+        return true;
+    }
+
     /** Count empty slots in the player inventory portion of the open chest GUI. */
     public static int freeInventorySlots(MinecraftClient mc) {
         GenericContainerScreenHandler chest = openChest(mc);
