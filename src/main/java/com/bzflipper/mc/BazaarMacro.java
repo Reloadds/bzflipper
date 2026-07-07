@@ -404,6 +404,30 @@ public class BazaarMacro {
             return;
         }
 
+        // 1.6) LIST HELD GOODS FIRST — before any cancel. Anything we're holding
+        //      (claimed or refunded from a cancel) gets a sell offer put up now, so
+        //      it never sits unlisted in the inventory and can't pile up → stash.
+        //      No cancel step runs while we're still holding goods to list.
+        if (!pendingSells.isEmpty()) {
+            String item = pendingSells.peekFirst();
+            if (!dailyOk) {
+                // Daily coin limit: a new sell offer would fail — instasell instead.
+                pendingInstasell = item;
+                pendingInstasellAmount = Math.max(1, pendingSellAmounts.getOrDefault(key(item), 1));
+                pendingSells.removeFirstOccurrence(item);
+                pendingSellAmounts.remove(key(item));
+                return;
+            }
+            if (slotFree) {
+                activeItem = item;
+                activeAmount = pendingSellAmounts.getOrDefault(key(item), 0);
+                startNav(item, Phase.SELL_OPEN);
+            } else {
+                statusLine = "order slots full — waiting to list " + item;
+            }
+            return;   // hold here; never cancel while goods wait to be listed
+        }
+
         // 1.7) Merge duplicate orders (one item should be ONE order, not four).
         //      Buys: cancel the worse-priced twin — refund redeploys the coins.
         //      Sells: cancel one twin; its units rejoin via the consolidation
@@ -415,26 +439,19 @@ public class BazaarMacro {
                 Map<String, ParsedOrder> m = o.buy() ? firstBuy : firstSell;
                 ParsedOrder prev = m.putIfAbsent(o.key(), o);
                 if (prev == null) continue;
+                // Only de-dup BUY orders (they waste order slots + split queue).
+                // Multiple SELL offers per item are fine — they all sell — and
+                // merging them means cancelling (refund → stash risk) for no gain.
+                if (!o.buy()) continue;
                 if (config.dryRun) { note("DRY: would merge duplicate orders of " + o.item()); continue; }
-                ParsedOrder toCancel;
-                if (o.buy()) {
-                    // keep the better (higher) priced buy — it's ahead in the queue
-                    boolean prevBetter = !Double.isNaN(prev.pricePerUnit())
-                            && (Double.isNaN(o.pricePerUnit()) || prev.pricePerUnit() >= o.pricePerUnit());
-                    toCancel = prevBetter ? o : prev;
-                    if (toCancel == prev) m.put(o.key(), o);
-                    cancelSilent = true;                     // just drop; twin stays
-                    cancelBailInstasell = false;
-                } else {
-                    toCancel = prev.amount() <= o.amount() ? prev : o;
-                    if (toCancel == prev) m.put(o.key(), o);
-                    // Sell-cancel refunds items — only merge if the refund FITS
-                    // (otherwise it overflows to the stash). Two offers is fine.
-                    if (!refundFits(mc, toCancel) || recentlyCancelled(toCancel.item())) continue;
-                    cancelSilent = false;                    // units re-list merged
-                    cancelBailInstasell = false;
-                }
-                statusLine = "merging duplicate orders: " + o.item();
+                // keep the better (higher) priced buy — it's ahead in the queue
+                boolean prevBetter = !Double.isNaN(prev.pricePerUnit())
+                        && (Double.isNaN(o.pricePerUnit()) || prev.pricePerUnit() >= o.pricePerUnit());
+                ParsedOrder toCancel = prevBetter ? o : prev;
+                if (toCancel == prev) m.put(o.key(), o);
+                cancelSilent = true;                     // just drop; twin stays
+                cancelBailInstasell = false;
+                statusLine = "merging duplicate buy orders: " + o.item();
                 cancelIsBuy = o.buy();
                 cancelRebuy = false;
                 cancelItem = toCancel.item();
@@ -442,30 +459,6 @@ public class BazaarMacro {
                 if (GuiHelper.clickSlotIndex(mc, toCancel.slot())) { markCancelled(toCancel.item()); phase = Phase.CANCEL; }
                 return;
             }
-        }
-
-        // 2) Consolidate: if we hold new goods for an item that ALREADY has a live
-        //    sell offer, cancel that offer — the returned + new units then get
-        //    listed together as one fresh offer at the front of the queue.
-        for (String pending : pendingSells) {
-            String key = key(pending);
-            ParsedOrder liveSell = grid.stream()
-                    .filter(g -> !g.buy() && g.key().equals(key)).findFirst().orElse(null);
-            if (liveSell == null) continue;
-            // Only consolidate if the cancelled offer's refund FITS in inventory —
-            // else the refund overflows to the stash. When it doesn't fit, we just
-            // list what we hold as a second offer (frees space; merges later).
-            if (!refundFits(mc, liveSell) || recentlyCancelled(pending)) continue;
-            if (config.dryRun) { note("DRY: would consolidate sell of " + pending); continue; }
-            statusLine = "consolidating sell: " + pending;
-            cancelIsBuy = false;
-            cancelRebuy = false;
-            cancelBailInstasell = false;
-            cancelSilent = false;
-            cancelItem = pending;
-            cancelAmount = liveSell.amount();
-            if (GuiHelper.clickSlotIndex(mc, liveSell.slot())) { markCancelled(pending); phase = Phase.CANCEL; }
-            return;
         }
 
         // 3) Relist anything beaten on price — exact math vs live top-of-book.
@@ -516,27 +509,7 @@ public class BazaarMacro {
             return;
         }
 
-        // 4) Sell claimed goods (fresh competitive price read at listing time).
-        if (!pendingSells.isEmpty()) {
-            String item = pendingSells.peekFirst();
-            if (!dailyOk) {
-                // Daily coin limit: creating a sell offer would fail — exit via
-                // instasell instead (an instant sale isn't an "order").
-                pendingInstasell = item;
-                pendingInstasellAmount = Math.max(1, pendingSellAmounts.getOrDefault(key(item), 1));
-                pendingSells.removeFirstOccurrence(item);
-                pendingSellAmounts.remove(key(item));
-                return;
-            }
-            if (slotFree) {
-                activeItem = item;
-                activeAmount = pendingSellAmounts.getOrDefault(key(item), 0);
-                startNav(item, Phase.SELL_OPEN);
-                return;
-            }
-            statusLine = "order slots full — waiting to list " + item;
-            // fall through to monitoring; a slot frees when an order completes
-        }
+        // (Held goods were already listed at step 1.6, before any cancel.)
 
         // 4.5) Sells are done and space is free — recover anything the server
         //      stashed (/pickupstash); the sweep lists it next pass.
