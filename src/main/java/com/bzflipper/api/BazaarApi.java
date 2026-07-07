@@ -131,10 +131,11 @@ public class BazaarApi {
                     ? buyOrders.get(0).getAsJsonObject().get("amount").getAsDouble() : 0;
             double sellDepth = sellOffers.get(0).getAsJsonObject().has("amount")
                     ? sellOffers.get(0).getAsJsonObject().get("amount").getAsDouble() : 0;
-            double volatility = updateAndGetVolatility(e.getKey(), (topBuyOrder + lowestSellOffer) / 2.0);
+            double[] stats = updateAndGetStats(e.getKey(), (topBuyOrder + lowestSellOffer) / 2.0);
+            double volatility = stats[0], trend = stats[1];
 
             FlipCandidate c = new FlipCandidate(e.getKey(), ItemNames.name(e.getKey()),
-                    topBuyOrder, lowestSellOffer, buyMW, sellMW, buyDepth, sellDepth, volatility);
+                    topBuyOrder, lowestSellOffer, buyMW, sellMW, buyDepth, sellDepth, volatility, trend);
             // Every item goes into the quote map (used for exact undercut checks
             // on orders we hold), regardless of the flip filters below.
             quoteMap.put(Keys.norm(c.displayName), c);
@@ -143,6 +144,8 @@ public class BazaarApi {
             // Volatility-adjusted floor: riskier items must clear a fatter cushion.
             if (margin < c.requiredMargin(config) || margin > config.apiMaxMargin) continue;
             if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
+            // Momentum: don't buy into a crash (protects the sell side).
+            if (trend < -config.crashFilter) continue;
             if (config.apiMaxUnitPrice > 0 && topBuyOrder > config.apiMaxUnitPrice) continue;
 
             // --- Anti-manipulation guards ---
@@ -176,21 +179,30 @@ public class BazaarApi {
         lastUpdatedMillis = System.currentTimeMillis();
     }
 
-    /** Append the item's mid price and return its rolling volatility (σ/μ). */
-    private double updateAndGetVolatility(String tag, double mid) {
+    /** Append the item's mid price; return {volatility σ/μ, trend %-change over window}. */
+    private double[] updateAndGetStats(String tag, double mid) {
         java.util.Deque<Double> hist = priceHistory.computeIfAbsent(tag, k -> new java.util.ArrayDeque<>());
         synchronized (hist) {
             hist.addLast(mid);
             while (hist.size() > HISTORY_LEN) hist.removeFirst();
-            if (hist.size() < 3) return 0;
+            int n = hist.size();
+            if (n < 4) return new double[]{0, 0};
+            double[] a = new double[n];
+            int i = 0;
             double mean = 0;
-            for (double v : hist) mean += v;
-            mean /= hist.size();
-            if (mean <= 0) return 0;
+            for (double v : hist) { a[i++] = v; mean += v; }
+            mean /= n;
+            if (mean <= 0) return new double[]{0, 0};
             double var = 0;
-            for (double v : hist) var += (v - mean) * (v - mean);
-            var /= hist.size();
-            return Math.sqrt(var) / mean;
+            for (double v : a) var += (v - mean) * (v - mean);
+            double vol = Math.sqrt(var / n) / mean;
+            // Trend: mean of the newest third vs the oldest third.
+            int k = Math.max(1, n / 3);
+            double first = 0, last = 0;
+            for (int j = 0; j < k; j++) { first += a[j]; last += a[n - 1 - j]; }
+            first /= k; last /= k;
+            double trend = first > 0 ? (last - first) / first : 0;
+            return new double[]{vol, trend};
         }
     }
 

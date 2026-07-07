@@ -128,6 +128,8 @@ public class BazaarMacro {
     private final Map<String, OrderInfo> orders = new HashMap<>();
     /** Realized-efficiency EMA per item (realized ÷ quoted profit); default 1.0. */
     private final Map<String, Double> efficiency = new HashMap<>();
+    /** All-time realized profit per item (for the session report best/worst). */
+    private final Map<String, Double> itemProfit = new HashMap<>();
     /** Canonical keys of everything we've ever bought — so leftover goods get
      *  sold even if their order was pruned/forgotten. Personal items are never here. */
     private final Set<String> boughtItems = new HashSet<>();
@@ -205,6 +207,7 @@ public class BazaarMacro {
         Map<String, Long> blacklistUntil = new HashMap<>();
         Set<String> boughtItems = new HashSet<>();
         Map<String, Double> efficiency = new HashMap<>();
+        Map<String, Double> itemProfit = new HashMap<>();
         double allTimeProfit = 0;
     }
 
@@ -227,6 +230,7 @@ public class BazaarMacro {
             if (s.blacklistUntil != null) blacklistUntil.putAll(s.blacklistUntil);
             if (s.boughtItems != null) boughtItems.addAll(s.boughtItems);
             if (s.efficiency != null) efficiency.putAll(s.efficiency);
+            if (s.itemProfit != null) itemProfit.putAll(s.itemProfit);
             allTimeProfit = s.allTimeProfit;
             System.out.println("[bzflipper] restored state: " + orders.size()
                     + " orders, " + pendingSells.size() + " pending sells");
@@ -250,6 +254,7 @@ public class BazaarMacro {
             s.blacklistUntil.putAll(blacklistUntil);
             s.boughtItems.addAll(boughtItems);
             s.efficiency.putAll(efficiency);
+            s.itemProfit.putAll(itemProfit);
             s.allTimeProfit = allTimeProfit;
             java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
             stateDirty = false;
@@ -300,6 +305,51 @@ public class BazaarMacro {
         statusLine = "stopped: " + why;
         log("stopped: " + why);
         saveState();
+        if (why.contains("toggled") || why.contains("panic")) reportSession();
+    }
+
+    /** Write a session summary to chat + config/bzflipper-report.txt. */
+    private void reportSession() {
+        long secs = tracker.elapsedSeconds();
+        var top = itemProfit.entrySet().stream()
+                .sorted((a, b) -> Double.compare(b.getValue(), a.getValue())).toList();
+
+        StringBuilder f = new StringBuilder();
+        f.append("=== bzflipper session report ===\n");
+        f.append(String.format(Locale.ROOT, "uptime           %dh %dm%n", secs / 3600, (secs % 3600) / 60));
+        f.append(String.format(Locale.ROOT, "session profit   %,.0f  (%,.0f/hr, %,.0f/hr recent)%n",
+                tracker.total(), tracker.sessionPerHour(), tracker.recentPerHour()));
+        f.append(String.format(Locale.ROOT, "all-time profit  %,.0f%n", allTimeProfit));
+        f.append(String.format(Locale.ROOT, "open-offer value +%,.0f (unrealized)%n", projectedProfit()));
+        f.append(String.format(Locale.ROOT, "flips %d   fills %dB/%dS   orders placed %d%n",
+                flipsCompleted, buysFilled, sellsFilled, ordersPlaced));
+        f.append(String.format(Locale.ROOT, "cookie buff      %s%n", cookieStatus));
+        f.append("\n-- best items --\n");
+        for (int i = 0; i < Math.min(6, top.size()); i++) {
+            f.append(String.format(Locale.ROOT, "  %+,.0f  %s%n", top.get(i).getValue(), top.get(i).getKey()));
+        }
+        boolean anyLoss = !top.isEmpty() && top.get(top.size() - 1).getValue() < 0;
+        if (anyLoss) {
+            f.append("-- worst items --\n");
+            for (int i = top.size() - 1; i >= 0 && top.get(i).getValue() < 0; i--) {
+                f.append(String.format(Locale.ROOT, "  %+,.0f  %s%n", top.get(i).getValue(), top.get(i).getKey()));
+            }
+        }
+
+        try {
+            java.nio.file.Files.writeString(net.fabricmc.loader.api.FabricLoader.getInstance()
+                    .getConfigDir().resolve("bzflipper-report.txt"), f.toString());
+        } catch (Exception ignored) {
+        }
+
+        log("§b── session report ──");
+        log(String.format(Locale.ROOT, "uptime %dh%dm · profit §a%,.0f§r (%,.0f/hr) · all-time §a%,.0f",
+                secs / 3600, (secs % 3600) / 60, tracker.total(), tracker.sessionPerHour(), allTimeProfit));
+        log(String.format(Locale.ROOT, "flips %d · %,.0f in open offers · full report → config/bzflipper-report.txt",
+                flipsCompleted, projectedProfit()));
+        if (!top.isEmpty()) {
+            log(String.format(Locale.ROOT, "best: §a%+,.0f§r %s", top.get(0).getValue(), top.get(0).getKey()));
+        }
     }
 
     // ---- main loop ----
@@ -736,6 +786,7 @@ public class BazaarMacro {
             double profit = (sellP * (1.0 - config.taxFraction) - buyP) * newSold;
             tracker.addProfit(profit);
             allTimeProfit += profit;
+            itemProfit.merge(o.item(), profit, Double::sum);
             stateDirty = true;
             // Feedback loop: how much of the QUOTED margin did we actually capture?
             if (oi != null && !Double.isNaN(oi.quotedMargin) && oi.quotedMargin > 0 && buyP > 0) {
@@ -1306,8 +1357,9 @@ public class BazaarMacro {
         var cs = api.getCandidates();
         if (!cs.isEmpty()) {
             FlipCandidate c = cs.get(0);
-            topCandidate = String.format(Locale.ROOT, "%s %.1f%% σ%.1f%%",
-                    c.displayName, c.margin(config.taxFraction) * 100, c.volatility * 100);
+            topCandidate = String.format(Locale.ROOT, "%s %.1f%% σ%.1f%% %s%.1f%%",
+                    c.displayName, c.margin(config.taxFraction) * 100, c.volatility * 100,
+                    c.trend >= 0 ? "§a↑§7" : "§c↓§7", Math.abs(c.trend) * 100);
         }
     }
 

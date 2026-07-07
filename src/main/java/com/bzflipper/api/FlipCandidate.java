@@ -19,10 +19,11 @@ public class FlipCandidate {
     public final double buyDepth;         // units queued at the top buy level
     public final double sellDepth;        // units queued at the top sell level
     public final double volatility;       // coefficient of variation of mid price (σ/μ)
+    public final double trend;            // relative price change over the window (+up/−down)
 
     public FlipCandidate(String tag, String displayName, double topBuyOrder,
                          double lowestSellOffer, double buyWeekVolume, double sellWeekVolume,
-                         double buyDepth, double sellDepth, double volatility) {
+                         double buyDepth, double sellDepth, double volatility, double trend) {
         this.tag = tag;
         this.displayName = displayName;
         this.topBuyOrder = topBuyOrder;
@@ -32,6 +33,7 @@ public class FlipCandidate {
         this.buyDepth = buyDepth;
         this.sellDepth = sellDepth;
         this.volatility = volatility;
+        this.trend = trend;
     }
 
     public double ourBuyPrice()  { return PriceMath.buyOrderPrice(topBuyOrder); }
@@ -58,6 +60,8 @@ public class FlipCandidate {
      */
     public double score(FlipConfig cfg) {
         double ppu = Math.max(0, PriceMath.profitPerUnit(topBuyOrder, lowestSellOffer, cfg.taxFraction));
-        return ppu * Math.pow(Math.max(1, minWeeklyVolume()), cfg.rankVolumeBeta);
+        double base = ppu * Math.pow(Math.max(1, minWeeklyVolume()), cfg.rankVolumeBeta);
+        double trendFactor = Math.max(0.5, Math.min(1.5, 1 + cfg.trendWeight * trend));  // momentum tilt
+        return base * trendFactor;
     }
 }

@@ -124,6 +124,14 @@ public class FlipConfig {
      *  below this — it's chronically contested/manipulated. */
     public double minEfficiency = 0.35;
 
+    /** Momentum weight: score ×= clamp(1 + trendWeight·trend). Prefers items
+     *  trending UP (our sell fills into a rising market). 0 = ignore trend. */
+    public double trendWeight = 0.6;
+
+    /** Skip items mid-crash: if the price fell more than this fraction over the
+     *  rolling window, don't buy into the drop (protects the sell side). */
+    public double crashFilter = 0.08;
+
     /** Minimum weekly volume (both sides) for liquidity — avoids dead items. */
     public double apiMinWeeklyVolume = 500_000;
 
