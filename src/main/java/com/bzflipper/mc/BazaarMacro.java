@@ -90,6 +90,8 @@ public class BazaarMacro {
     private double activeHourlyVol = Double.MAX_VALUE;
     private int activeStackSize = 64;         // for inventory-fit sizing
     private boolean activeBypassInv = false;  // essence/shards bypass inventory
+    private double activeVolatility = 0;      // σ of the item being bought (for Kelly)
+    private double activeMargin = 0;          // quoted margin of the item being bought
 
     // Cancel context (which side we're cancelling and why).
     private boolean cancelIsBuy = true;
@@ -114,9 +116,12 @@ public class BazaarMacro {
         int amount;
         int claimedSoFar = 0;       // units already claimed from a partially-filled buy
         int soldSoFar = 0;          // units already sold+claimed from the sell offer
+        double quotedMargin = Double.NaN;   // margin the API quoted when we bought (for efficiency)
         long placedAt = System.currentTimeMillis();
     }
     private final Map<String, OrderInfo> orders = new HashMap<>();
+    /** Realized-efficiency EMA per item (realized ÷ quoted profit); default 1.0. */
+    private final Map<String, Double> efficiency = new HashMap<>();
     /** Canonical keys of everything we've ever bought — so leftover goods get
      *  sold even if their order was pruned/forgotten. Personal items are never here. */
     private final Set<String> boughtItems = new HashSet<>();
@@ -188,6 +193,7 @@ public class BazaarMacro {
         Map<String, Integer> pendingSellAmounts = new HashMap<>();
         Map<String, Long> blacklistUntil = new HashMap<>();
         Set<String> boughtItems = new HashSet<>();
+        Map<String, Double> efficiency = new HashMap<>();
         double allTimeProfit = 0;
     }
 
@@ -209,6 +215,7 @@ public class BazaarMacro {
             if (s.pendingSellAmounts != null) pendingSellAmounts.putAll(s.pendingSellAmounts);
             if (s.blacklistUntil != null) blacklistUntil.putAll(s.blacklistUntil);
             if (s.boughtItems != null) boughtItems.addAll(s.boughtItems);
+            if (s.efficiency != null) efficiency.putAll(s.efficiency);
             allTimeProfit = s.allTimeProfit;
             System.out.println("[bzflipper] restored state: " + orders.size()
                     + " orders, " + pendingSells.size() + " pending sells");
@@ -231,6 +238,7 @@ public class BazaarMacro {
             s.pendingSellAmounts.putAll(pendingSellAmounts);
             s.blacklistUntil.putAll(blacklistUntil);
             s.boughtItems.addAll(boughtItems);
+            s.efficiency.putAll(efficiency);
             s.allTimeProfit = allTimeProfit;
             java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
             stateDirty = false;
@@ -700,6 +708,12 @@ public class BazaarMacro {
             tracker.addProfit(profit);
             allTimeProfit += profit;
             stateDirty = true;
+            // Feedback loop: how much of the QUOTED margin did we actually capture?
+            if (oi != null && !Double.isNaN(oi.quotedMargin) && oi.quotedMargin > 0 && buyP > 0) {
+                double realizedMargin = (sellP * (1.0 - config.taxFraction) - buyP) / buyP;
+                double ratio = Math.max(0, Math.min(2.0, realizedMargin / oi.quotedMargin));
+                efficiency.merge(o.key(), ratio, (old, r) -> 0.7 * old + 0.3 * r);   // EMA
+            }
             log(String.format(Locale.ROOT, "§asold§r %d× %s  %+,.0f coins  (session %,.0f)",
                     newSold, o.item(), profit, tracker.total()));
         } else {
@@ -760,14 +774,17 @@ public class BazaarMacro {
                 String key = key(c.displayName);
                 if (held.contains(key)) continue;
                 if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // relist-war item
+                if (efficiency.getOrDefault(key, 1.0) < config.minEfficiency) continue; // chronically bad
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
                 // Skip genuinely thin items (absolute floor, not purse-relative, so
                 // a bigger purse never reduces how many items qualify).
-                double volValue = (c.minWeeklyVolume() / 168.0) * config.orderVolumeFraction * c.ourBuyPrice();
+                double volValue = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
                 if (config.minOrderValue > 0 && volValue < config.minOrderValue) continue;
-                activeHourlyVol = c.minWeeklyVolume() / 168.0;
+                activeHourlyVol = c.hourlyVolume();
                 activeBypassInv = ItemNames.bypassesInventory(c.tag);
                 activeStackSize = ItemNames.stackSize(c.tag);
+                activeVolatility = c.volatility;
+                activeMargin = c.margin(config.taxFraction);
                 return c.displayName;
             }
             return null;
@@ -865,7 +882,16 @@ public class BazaarMacro {
             if (byInv < 1) { note("§einventory full§r — skipping " + activeItem); phase = Phase.PLAN; return; }
         }
 
-        activeAmount = Math.max(1, Math.min(Math.min(byPurse, byVolume), byInv));
+        // Fractional-Kelly cap: risk-adjusted position size. f* = min(1, edge/σ²);
+        // stake = bankroll · f* · kellyFraction. Low-vol/high-margin → big; risky → small.
+        int byKelly = Integer.MAX_VALUE;
+        if (config.kellyFraction > 0 && activeVolatility > 1e-6 && activeMargin > 0) {
+            double bankroll = purse - config.coinReserve;
+            double f = Math.min(1.0, activeMargin / (activeVolatility * activeVolatility)) * config.kellyFraction;
+            byKelly = Math.max(1, (int) (bankroll * f / ourBuyPrice));
+        }
+
+        activeAmount = Math.max(1, Math.min(Math.min(byPurse, byVolume), Math.min(byInv, byKelly)));
         statusLine = "amount " + activeAmount + " × " + activeItem;
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) {
             requestSign(Integer.toString(activeAmount), Phase.BUY_PRICE);
@@ -880,6 +906,7 @@ public class BazaarMacro {
             oi.name = activeItem;
             oi.buyPrice = ourBuyPrice;
             oi.amount = activeAmount;
+            oi.quotedMargin = activeMargin;
             orders.put(key(activeItem), oi);
             boughtItems.add(key(activeItem));
             ordersPlaced++;
@@ -1125,8 +1152,8 @@ public class BazaarMacro {
         var cs = api.getCandidates();
         if (!cs.isEmpty()) {
             FlipCandidate c = cs.get(0);
-            topCandidate = String.format(Locale.ROOT, "%s (%.1f%%)",
-                    c.displayName, c.margin(config.taxFraction) * 100);
+            topCandidate = String.format(Locale.ROOT, "%s %.1f%% σ%.1f%%",
+                    c.displayName, c.margin(config.taxFraction) * 100, c.volatility * 100);
         }
     }
 

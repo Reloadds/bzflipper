@@ -48,6 +48,11 @@ public class BazaarApi {
     private volatile long lastUpdatedMillis = 0;
     private volatile String lastError = null;
 
+    /** Rolling mid-price history per item → volatility (coefficient of variation). */
+    private static final int HISTORY_LEN = 20;
+    private final Map<String, java.util.Deque<Double>> priceHistory =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     private ScheduledExecutorService exec;
 
     public BazaarApi(FlipConfig config) {
@@ -122,15 +127,21 @@ public class BazaarApi {
             double buyMW = q.get("buyMovingWeek").getAsDouble();
             double sellMW = q.get("sellMovingWeek").getAsDouble();
 
+            double buyDepth  = buyOrders.get(0).getAsJsonObject().has("amount")
+                    ? buyOrders.get(0).getAsJsonObject().get("amount").getAsDouble() : 0;
+            double sellDepth = sellOffers.get(0).getAsJsonObject().has("amount")
+                    ? sellOffers.get(0).getAsJsonObject().get("amount").getAsDouble() : 0;
+            double volatility = updateAndGetVolatility(e.getKey(), (topBuyOrder + lowestSellOffer) / 2.0);
+
             FlipCandidate c = new FlipCandidate(e.getKey(), ItemNames.name(e.getKey()),
-                    topBuyOrder, lowestSellOffer, buyMW, sellMW);
+                    topBuyOrder, lowestSellOffer, buyMW, sellMW, buyDepth, sellDepth, volatility);
             // Every item goes into the quote map (used for exact undercut checks
             // on orders we hold), regardless of the flip filters below.
             quoteMap.put(Keys.norm(c.displayName), c);
 
             double margin = PriceMath.netMarginFraction(topBuyOrder, lowestSellOffer, config.taxFraction);
-            // Skip thin spreads AND absurd ones (huge margins are illiquid/manipulation traps).
-            if (margin < config.apiMinMargin || margin > config.apiMaxMargin) continue;
+            // Volatility-adjusted floor: riskier items must clear a fatter cushion.
+            if (margin < c.requiredMargin(config) || margin > config.apiMaxMargin) continue;
             if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
             if (config.apiMaxUnitPrice > 0 && topBuyOrder > config.apiMaxUnitPrice) continue;
 
@@ -159,10 +170,28 @@ public class BazaarApi {
             list.add(c);
         }
 
-        list.sort((a, b) -> Double.compare(b.score(config.taxFraction), a.score(config.taxFraction)));
+        list.sort((a, b) -> Double.compare(b.score(config), a.score(config)));
         candidates = List.copyOf(list.subList(0, Math.min(list.size(), 30)));
         quotes = Map.copyOf(quoteMap);
         lastUpdatedMillis = System.currentTimeMillis();
+    }
+
+    /** Append the item's mid price and return its rolling volatility (σ/μ). */
+    private double updateAndGetVolatility(String tag, double mid) {
+        java.util.Deque<Double> hist = priceHistory.computeIfAbsent(tag, k -> new java.util.ArrayDeque<>());
+        synchronized (hist) {
+            hist.addLast(mid);
+            while (hist.size() > HISTORY_LEN) hist.removeFirst();
+            if (hist.size() < 3) return 0;
+            double mean = 0;
+            for (double v : hist) mean += v;
+            mean /= hist.size();
+            if (mean <= 0) return 0;
+            double var = 0;
+            for (double v : hist) var += (v - mean) * (v - mean);
+            var /= hist.size();
+            return Math.sqrt(var) / mean;
+        }
     }
 
     /** Fetch the real item-name table once (resources/skyblock/items). */

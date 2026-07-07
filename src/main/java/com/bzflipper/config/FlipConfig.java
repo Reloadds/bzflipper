@@ -107,6 +107,23 @@ public class FlipConfig {
     /** Maximum net margin — anything above is almost always an illiquid/manipulation trap. */
     public double apiMaxMargin = 0.30;
 
+    // ---- Advanced ranking / risk (quant model) ----
+    /** Volume weight in ranking: score = profitPerUnit × volume^β. 1 = pure
+     *  throughput, <1 tilts toward margin/ROI (better when purse-limited). */
+    public double rankVolumeBeta = 0.85;
+
+    /** Extra margin demanded per unit of price volatility σ:
+     *  requiredMargin = apiMinMargin + volatilityLambda·σ. Higher = more cautious. */
+    public double volatilityLambda = 0.6;
+
+    /** Fractional-Kelly position sizing: N ∝ bankroll·min(1, margin/σ²)·kellyFraction.
+     *  0 disables Kelly (fall back to purse/volume/inventory caps only). */
+    public double kellyFraction = 0.25;
+
+    /** Skip an item whose realized-efficiency EMA (realized ÷ quoted profit) drops
+     *  below this — it's chronically contested/manipulated. */
+    public double minEfficiency = 0.35;
+
     /** Minimum weekly volume (both sides) for liquidity — avoids dead items. */
     public double apiMinWeeklyVolume = 500_000;
 
