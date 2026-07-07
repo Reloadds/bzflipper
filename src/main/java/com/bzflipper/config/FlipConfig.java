@@ -165,6 +165,14 @@ public class FlipConfig {
     /** Claim a buy order's goods once at least this fraction is filled (1.0 = wait for full). */
     public double partialClaimFraction = 0.15;
 
+    /** Don't claim/list a partial fill until at least this many units are ready —
+     *  avoids tiny 2-5 unit claims and micro sell offers. Full fills always claim. */
+    public int minClaimUnits = 64;
+
+    /** Force-refresh the Manage Orders screen every N seconds so fresh fills show
+     *  up (Hypixel only updates the grid when the container is re-opened). */
+    public int manageRefreshSeconds = 8;
+
     /** After this many relists on one order, stop fighting: blacklist the item for a while. */
     public int maxRelistsPerOrder = 6;
 

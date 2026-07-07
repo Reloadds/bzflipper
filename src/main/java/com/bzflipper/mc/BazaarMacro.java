@@ -58,6 +58,7 @@ public class BazaarMacro {
     private long dailyLimitUntil = 0;       // pause new orders until this time
     private boolean serverClosing = false;  // Hypixel restart in progress → pause
     private Object lastWorld = null;         // detect world change (rejoin)
+    private long lastManageRefresh = 0;      // periodic Manage re-open to catch new fills
     private boolean inventoryFull = false;   // server said "no space" → sell before claiming
     private boolean stashPending = false;    // materials went to the stash → recover them
 
@@ -480,6 +481,14 @@ public class BazaarMacro {
             if (!o.claimable()) continue;
             if (config.dryRun) { note("DRY: would claim " + o.item()); continue; }
             if (o.buy()) {
+                // Don't claim a tiny partial fill — wait until enough is ready
+                // (full fills always claim so nothing is left behind).
+                int ready = o.claimAmount() > 0 ? o.claimAmount()
+                        : (int) Math.floor(o.amount() * o.filledPct() / 100.0);
+                if (!o.filled() && ready < config.minClaimUnits) {
+                    statusLine = "waiting for " + config.minClaimUnits + "× " + o.item() + " (" + ready + " ready)";
+                    continue;
+                }
                 // BRAIN RULE: never claim more of an item we're still holding
                 // unsold — list what we have first, then claim the next batch.
                 // (Also closes the stale-inventory overflow → stash window.)
@@ -681,6 +690,15 @@ public class BazaarMacro {
                 startNav(pick, Phase.BUY_OPEN);
                 return;
             }
+        }
+        // Nothing to do — but Hypixel only updates order fill % when the Manage
+        // screen is re-opened. Periodically bounce out and back so fresh fills
+        // register (fixes "orders don't show filled until you refresh").
+        if (System.currentTimeMillis() - lastManageRefresh > config.manageRefreshSeconds * 1000L) {
+            lastManageRefresh = System.currentTimeMillis();
+            GuiHelper.clickByName(mc, BazaarStrings.BTN_GO_BACK);   // goToManage reopens it fresh next pass
+            statusLine = "refreshing orders…";
+            return;
         }
         statusLine = String.format(Locale.ROOT, "monitoring %dB/%dS — %s",
                 buyCount, sellCount, idleReason());
