@@ -24,9 +24,11 @@ public class FlipConfig {
     /** Random extra 0..N ticks added to each delay so timing isn't robotic. */
     public int actionJitterTicks = 2;
 
-    /** Deliberate pace (ticks) between placing brand-NEW buy orders only — relists,
-     *  claims and sells are never slowed by this. */
-    public int orderCooldownTicks = 30;
+    /** Deliberate EXTRA pace (ticks) between placing brand-NEW buy orders only —
+     *  relists, claims and sells are never slowed by this. 0 = off (the default):
+     *  the multi-step order flow already spaces new orders ~1.5s apart, so the
+     *  book fills briskly. Raise it only if you want a bigger breather. */
+    public int orderCooldownTicks = 0;
 
     /** Bazaar sell tax fraction used in margin math (auto-detected in-game). */
     public double taxFraction = 0.0125;
@@ -248,7 +250,12 @@ public class FlipConfig {
             if (Files.exists(p)) {
                 String json = Files.readString(p);
                 FlipConfig cfg = GSON.fromJson(json, FlipConfig.class);
-                if (cfg != null) return cfg;
+                if (cfg != null) {
+                    // Migrate the legacy 30-tick new-order cooldown (never chosen
+                    // deliberately — it just slowed the book from filling) to off.
+                    if (cfg.orderCooldownTicks == 30) { cfg.orderCooldownTicks = 0; cfg.save(); }
+                    return cfg;
+                }
             }
         } catch (IOException | RuntimeException e) {
             System.err.println("[bzflipper] Failed to load config, using defaults: " + e.getMessage());

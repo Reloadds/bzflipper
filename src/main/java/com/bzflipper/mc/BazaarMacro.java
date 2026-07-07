@@ -1271,7 +1271,10 @@ public class BazaarMacro {
             boughtItems.add(key(activeItem));
             ordersPlaced++;
             stateDirty = true;
-            buyCooldown = config.orderCooldownTicks;
+            // No deliberate post-order cooldown: the multi-step nav/confirm flow
+            // already spaces new orders ~1.5s apart naturally, so the book fills
+            // briskly. Opt back in by setting orderCooldownTicks > 0 in config.
+            if (config.orderCooldownTicks > 0) buyCooldown = config.orderCooldownTicks;
             log(String.format(Locale.ROOT, "§abuy§r %d× %s @ %.1f  (%,.0f coins)",
                     activeAmount, activeItem, ourBuyPrice, activeAmount * ourBuyPrice));
             activeItem = null;
