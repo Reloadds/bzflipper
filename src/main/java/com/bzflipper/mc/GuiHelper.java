@@ -104,6 +104,20 @@ public final class GuiHelper {
         return findSlotExact(mc, needle) >= 0;
     }
 
+    /** True if a slot's name matches {@code needle} ignoring case/punctuation/symbols
+     *  (e.g. "☘ Fine Peridot Gemstone" matches "Fine Peridot Gemstone"). */
+    public static boolean hasNormItemNamed(MinecraftClient mc, String needle) {
+        GenericContainerScreenHandler chest = openChest(mc);
+        if (chest == null) return false;
+        String n = com.bzflipper.core.Keys.norm(needle);
+        if (n.isEmpty()) return false;
+        int count = chestSlotCount(chest);
+        for (int i = 0; i < count; i++) {
+            if (com.bzflipper.core.Keys.norm(name(chest.getSlot(i).getStack())).equals(n)) return true;
+        }
+        return false;
+    }
+
     /** Click the exact-named slot; fall back to a substring match. True if clicked. */
     public static boolean clickExactName(MinecraftClient mc, String needle) {
         int idx = findSlotExact(mc, needle);

@@ -148,7 +148,8 @@ public class BazaarMacro {
 
     // ---- Persistence (survives relogs: leftover goods get re-listed) ----
     private static final com.google.gson.Gson GSON =
-            new com.google.gson.GsonBuilder().setPrettyPrinting().create();
+            new com.google.gson.GsonBuilder().setPrettyPrinting()
+                    .serializeSpecialFloatingPointValues().create();
     private boolean stateDirty = false;
     private long lastStateSave = 0;
 
@@ -278,6 +279,7 @@ public class BazaarMacro {
             stateDirty = false;
             lastStateSave = System.currentTimeMillis();
         } catch (Exception e) {
+            lastStateSave = System.currentTimeMillis();   // throttle retries even if it failed
             System.err.println("[bzflipper] state save failed: " + e.getMessage());
         }
     }
@@ -1474,7 +1476,9 @@ public class BazaarMacro {
     private boolean arrivedAtProduct(MinecraftClient mc, String item) {
         // The title is often truncated ("...➜ lesser soulfl"), so verify by the
         // product's own item icon on the page, which carries the full name.
-        return atProduct(mc) && GuiHelper.hasExactItemNamed(mc, item);
+        // Normalized match so symbol-prefixed items ("☘ Fine Peridot Gemstone",
+        // "⚚ …") still register as arrived — an exact match misses the prefix.
+        return atProduct(mc) && GuiHelper.hasNormItemNamed(mc, item);
     }
 
     private boolean goToManage(MinecraftClient mc) {
