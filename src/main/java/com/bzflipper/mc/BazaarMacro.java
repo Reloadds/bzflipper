@@ -416,6 +416,9 @@ public class BazaarMacro {
                 } else {
                     toCancel = prev.amount() <= o.amount() ? prev : o;
                     if (toCancel == prev) m.put(o.key(), o);
+                    // Sell-cancel refunds items — only merge if the refund FITS
+                    // (otherwise it overflows to the stash). Two offers is fine.
+                    if (!refundFits(mc, toCancel) || recentlyCancelled(toCancel.item())) continue;
                     cancelSilent = false;                    // units re-list merged
                     cancelBailInstasell = false;
                 }
@@ -424,7 +427,7 @@ public class BazaarMacro {
                 cancelRebuy = false;
                 cancelItem = toCancel.item();
                 cancelAmount = toCancel.amount();
-                if (GuiHelper.clickSlotIndex(mc, toCancel.slot())) phase = Phase.CANCEL;
+                if (GuiHelper.clickSlotIndex(mc, toCancel.slot())) { markCancelled(toCancel.item()); phase = Phase.CANCEL; }
                 return;
             }
         }
@@ -437,6 +440,10 @@ public class BazaarMacro {
             ParsedOrder liveSell = grid.stream()
                     .filter(g -> !g.buy() && g.key().equals(key)).findFirst().orElse(null);
             if (liveSell == null) continue;
+            // Only consolidate if the cancelled offer's refund FITS in inventory —
+            // else the refund overflows to the stash. When it doesn't fit, we just
+            // list what we hold as a second offer (frees space; merges later).
+            if (!refundFits(mc, liveSell) || recentlyCancelled(pending)) continue;
             if (config.dryRun) { note("DRY: would consolidate sell of " + pending); continue; }
             statusLine = "consolidating sell: " + pending;
             cancelIsBuy = false;
@@ -445,7 +452,7 @@ public class BazaarMacro {
             cancelSilent = false;
             cancelItem = pending;
             cancelAmount = liveSell.amount();
-            if (GuiHelper.clickSlotIndex(mc, liveSell.slot())) phase = Phase.CANCEL;
+            if (GuiHelper.clickSlotIndex(mc, liveSell.slot())) { markCancelled(pending); phase = Phase.CANCEL; }
             return;
         }
 
@@ -460,6 +467,9 @@ public class BazaarMacro {
                     : q.lowestSellOffer < o.pricePerUnit() - EPS;  // someone offers lower than us
             if (!beaten) continue;
             if (config.dryRun) { note("DRY: would relist " + o.item()); continue; }
+            // Sell-side cancel refunds items: skip until the refund fits, and
+            // don't double-cancel the same offer while the grid catches up.
+            if (!o.buy() && (!refundFits(mc, o) || recentlyCancelled(o.item()))) continue;
             int relists = relistCounts.merge(o.key(), 1, Integer::sum);
             statusLine = "beaten on " + o.item() + " — cancelling (relist #" + relists + ")";
             cancelIsBuy = o.buy();
@@ -471,7 +481,7 @@ public class BazaarMacro {
             cancelSilent = false;
             cancelItem = o.item();
             cancelAmount = o.amount();
-            if (GuiHelper.clickSlotIndex(mc, o.slot())) phase = Phase.CANCEL;
+            if (GuiHelper.clickSlotIndex(mc, o.slot())) { markCancelled(o.item()); phase = Phase.CANCEL; }
             return;
         }
 
@@ -555,6 +565,37 @@ public class BazaarMacro {
      * sale. Only items the flipper itself bought are touched; personal items are
      * never auto-sold.
      */
+    /**
+     * THE stash-overflow gate: cancelling a sell offer REFUNDS its unsold items
+     * to the inventory — if they don't fit, the server dumps them in the stash.
+     * Never cancel a sell offer unless the refund fits in free inventory space.
+     */
+    private boolean refundFits(MinecraftClient mc, ParsedOrder sellOrder) {
+        if (inventoryFull) return false;
+        FlipCandidate q = api.quote(sellOrder.item());
+        String tag = q != null ? q.tag : null;
+        int stack = tag != null ? ItemNames.stackSize(tag) : 64;
+        int remaining = Math.max(1, sellOrder.amount()
+                - (int) Math.floor(sellOrder.amount() * sellOrder.filledPct() / 100.0));
+        int needed = (int) Math.ceil(remaining / (double) stack);
+        return GuiHelper.freeInventorySlots(mc) >= needed + 1;   // +1 slot safety
+    }
+
+    // Per-item cancel cooldown: a cancel takes a moment to reflect in the grid;
+    // without this the same offer gets cancel-clicked twice.
+    private String lastCancelKey = null;
+    private long lastCancelAt = 0;
+
+    private boolean recentlyCancelled(String item) {
+        return key(item).equals(lastCancelKey)
+                && System.currentTimeMillis() - lastCancelAt < 5_000;
+    }
+
+    private void markCancelled(String item) {
+        lastCancelKey = key(item);
+        lastCancelAt = System.currentTimeMillis();
+    }
+
     /** Enough inventory space to claim this buy order? Essence/shards bypass it. */
     private boolean hasSpaceToClaim(MinecraftClient mc, ParsedOrder o) {
         FlipCandidate q = api.quote(o.item());
