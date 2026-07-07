@@ -112,18 +112,23 @@ public class AutoStart {
                 }
             }
             case WAIT_WORLD_CHANGE -> {
-                if (mc.world != worldBefore) {           // server transfer happened
+                // Confirm the island from the scoreboard ("⏣ Your Island") — reliable
+                // even when /is doesn't swap the world object. Then start the 8s timer.
+                if (onIsland(mc)) {
+                    chat(mc, "autostart: island loaded — flipper in " + config.autoDelaySeconds + "s");
                     timer = 0;
                     stage = Stage.DELAY_ISLAND;
                     return;
                 }
-                if (++timer > 300) {                     // 15s: already on island
-                    chat(mc, "autostart: no world change — assuming already on island");
+                if (++timer > 300) {                     // 15s fallback
+                    chat(mc, "autostart: island not confirmed — starting anyway in "
+                            + config.autoDelaySeconds + "s");
                     timer = 0;
                     stage = Stage.DELAY_ISLAND;
                 }
             }
             case DELAY_ISLAND -> {
+                // Start exactly autoDelaySeconds after the island was detected.
                 if (++timer >= config.autoDelaySeconds * 20) {
                     stage = Stage.DONE;
                     if (!macro.isEnabled()) {
@@ -146,6 +151,14 @@ public class AutoStart {
 
     private static boolean onSkyBlock(MinecraftClient mc) {
         return ScoreboardReader.title(mc).toLowerCase(Locale.ROOT).contains("skyblock");
+    }
+
+    /** True once the SkyBlock sidebar shows we're on an island ("⏣ Your Island"). */
+    private static boolean onIsland(MinecraftClient mc) {
+        for (String l : ScoreboardReader.sidebarLines(mc)) {
+            if (l.toLowerCase(Locale.ROOT).contains("island")) return true;
+        }
+        return false;
     }
 
     private static void sendCmd(MinecraftClient mc, String cmd) {
