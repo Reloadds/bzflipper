@@ -165,12 +165,13 @@ public class FlipConfig {
     /** Claim a buy order's goods once at least this fraction is filled (1.0 = wait for full). */
     public double partialClaimFraction = 0.15;
 
-    /** Don't claim/list a partial fill until at least this many units are ready —
-     *  avoids tiny 2-5 unit claims and micro sell offers. Full fills always claim. */
-    public int minClaimUnits = 64;
+    /** Don't claim a partial fill until at least this many units are ready — avoids
+     *  tiny claims / micro sell offers. Small or stalled orders are exempt so they
+     *  never get stranded; full fills always claim. */
+    public int minClaimUnits = 15;
 
-    /** Claim a partial fill anyway after it's been claimable this long, so a stalled
-     *  order below minClaimUnits never gets stranded. */
+    /** Claim a partial anyway after it's been claimable this long, so a stalled
+     *  order below the threshold never gets stranded. */
     public int claimGraceSeconds = 45;
 
     /** Force-refresh the Manage Orders screen every N seconds so fresh fills show

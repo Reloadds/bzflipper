@@ -60,6 +60,7 @@ public class BazaarMacro {
     private Object lastWorld = null;         // detect world change (rejoin)
     private long lastManageRefresh = 0;      // periodic Manage re-open to catch new fills
     private final Map<String, Long> firstClaimable = new HashMap<>();  // stall-grace timing
+    private String mergingItem = null;       // item whose duplicate sell offers we're combining
     private boolean inventoryFull = false;   // server said "no space" → sell before claiming
     private boolean stashPending = false;    // materials went to the stash → recover them
 
@@ -487,10 +488,10 @@ public class BazaarMacro {
             if (!o.claimable()) continue;
             if (config.dryRun) { note("DRY: would claim " + o.item()); continue; }
             if (o.buy()) {
-                // Batch tiny partials — but never strand a small or stalled order.
+                // Batch small partials — but never strand a small or stalled order.
                 int ready = o.claimAmount() > 0 ? o.claimAmount()
                         : (int) Math.floor(o.amount() * o.filledPct() / 100.0);
-                boolean small = o.amount() <= config.minClaimUnits;   // whole order < threshold
+                boolean small = o.amount() <= config.minClaimUnits;
                 long firstSeen = firstClaimable.computeIfAbsent(o.key(), k -> System.currentTimeMillis());
                 boolean stalled = System.currentTimeMillis() - firstSeen > config.claimGraceSeconds * 1000L;
                 if (!o.filled() && !small && !stalled && ready < config.minClaimUnits) {
@@ -522,6 +523,40 @@ public class BazaarMacro {
             activeItem = pendingInstasell;
             startNav(pendingInstasell, Phase.SELL_INSTANT);
             return;
+        }
+
+        // 1.55) MERGE duplicate sell offers into ONE. Cancel every offer of an item
+        //       that has 2+ (refund → inventory); once none remain, step 1.6 lists
+        //       the combined held stack as a single offer. Aborts if it won't fit.
+        if (mergingItem == null) {
+            Map<String, Integer> sellCount = new HashMap<>();
+            for (ParsedOrder o : grid) if (!o.buy() && !o.claimable()) sellCount.merge(o.key(), 1, Integer::sum);
+            for (ParsedOrder o : grid) {
+                if (!o.buy() && !o.claimable() && sellCount.getOrDefault(o.key(), 0) >= 2) {
+                    mergingItem = o.item();
+                    break;
+                }
+            }
+        }
+        if (mergingItem != null) {
+            String mk = key(mergingItem);
+            List<ParsedOrder> offs = grid.stream()
+                    .filter(g -> !g.buy() && g.key().equals(mk) && !g.claimable()).toList();
+            if (offs.isEmpty()) {
+                mergingItem = null;                       // all cancelled → 1.6 lists the combined stack
+            } else if (recentlyCancelled(mergingItem)) {
+                statusLine = "merging offers: " + mergingItem;
+                return;                                   // wait for the grid to reflect the last cancel
+            } else if (config.dryRun || !refundFits(mc, offs.get(0))) {
+                mergingItem = null;                       // dry run, or won't fit → leave as-is
+            } else {
+                ParsedOrder tc = offs.get(0);
+                statusLine = "merging sell offers: " + mergingItem;
+                cancelIsBuy = false; cancelRebuy = false; cancelBailInstasell = false; cancelSilent = false;
+                cancelItem = tc.item(); cancelAmount = tc.amount();
+                if (GuiHelper.clickSlotIndex(mc, tc.slot())) { markCancelled(tc.item()); phase = Phase.CANCEL; }
+                return;
+            }
         }
 
         // 1.6) LIST HELD GOODS FIRST — before any cancel. Anything we're holding
