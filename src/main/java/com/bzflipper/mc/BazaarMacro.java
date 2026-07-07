@@ -478,6 +478,13 @@ public class BazaarMacro {
                 double floor = minProfitableSell(o.item());
                 if (!Double.isNaN(floor) && q.lowestSellOffer - PriceMath.TICK < floor) continue;
             }
+            // Buy-side: don't chase the price UP into an unprofitable buy during an
+            // outbid war — if outbidding leaves no margin vs the sell side, hold.
+            if (o.buy() && config.neverSellAtLoss) {
+                double newBuy = q.topBuyOrder + PriceMath.TICK;
+                double sellNet = q.lowestSellOffer * (1 - config.taxFraction);
+                if (sellNet <= newBuy * (1 + config.minSellMargin)) continue;
+            }
             // Sell-side cancel refunds items: skip until the refund fits, and
             // don't double-cancel the same offer while the grid catches up.
             if (!o.buy() && (!refundFits(mc, o) || recentlyCancelled(o.item()))) continue;
