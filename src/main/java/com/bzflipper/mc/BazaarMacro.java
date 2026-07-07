@@ -353,6 +353,12 @@ public class BazaarMacro {
         for (ParsedOrder o : grid) {
             if (!o.claimable()) continue;
             if (config.dryRun) { note("DRY: would claim " + o.item()); continue; }
+            // Don't attempt a buy-claim that won't fit ("You don't have the space
+            // required to claim that!"). Skip it — the sell steps free space first.
+            if (o.buy() && !hasSpaceToClaim(mc, o)) {
+                note("§einventory full§r — selling to free space before claiming " + o.item());
+                continue;
+            }
             statusLine = "claiming " + (o.buy() ? "bought " : "sold ") + o.item();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) {
                 if (o.buy()) onBuyClaimed(o);
@@ -519,10 +525,29 @@ public class BazaarMacro {
      * sale. Only items the flipper itself bought are touched; personal items are
      * never auto-sold.
      */
+    /** Enough inventory space to claim this buy order? Essence/shards bypass it. */
+    private boolean hasSpaceToClaim(MinecraftClient mc, ParsedOrder o) {
+        FlipCandidate q = api.quote(o.item());
+        String tag = q != null ? q.tag : null;
+        String lower = o.item().toLowerCase(Locale.ROOT);
+        if ((tag != null && ItemNames.bypassesInventory(tag))
+                || lower.endsWith("essence") || lower.endsWith("shard")) {
+            return true;   // goes to storage, not the inventory
+        }
+        int stack = tag != null ? ItemNames.stackSize(tag) : 64;
+        int amount = o.claimAmount() > 0 ? o.claimAmount() : stack;
+        int needed = Math.max(1, (int) Math.ceil(amount / (double) stack));
+        return GuiHelper.freeInventorySlots(mc) >= needed;
+    }
+
     private void sweepLeftovers(Set<String> invNames, List<ParsedOrder> grid) {
         for (String name : invNames) {
             String k = key(name);
-            if (!boughtItems.contains(k)) continue;   // only items WE bought — never personal items
+            // Sell items we bought, plus (optionally) any other bazaar-sellable item
+            // found in inventory — but never personal/non-bazaar items.
+            boolean ours = boughtItems.contains(k);
+            boolean bazaarItem = config.sellAllBazaarItems && api.quote(name) != null;
+            if (!ours && !bazaarItem) continue;
             boolean liveSell = grid.stream().anyMatch(g -> !g.buy() && g.key().equals(k));
             boolean queued = pendingSells.stream().anyMatch(s -> key(s).equals(k));
             boolean instasell = pendingInstasell != null && key(pendingInstasell).equals(k);

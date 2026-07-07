@@ -68,6 +68,10 @@ public class FlipConfig {
     /** Keep this many inventory slots free as a buffer when sizing by inventory. */
     public int inventoryBuffer = 3;
 
+    /** On startup / each pass, list ANY bazaar-sellable item found in your inventory
+     *  (not just ones the macro bought) — clears leftovers and keeps space free. */
+    public boolean sellAllBazaarItems = true;
+
     /**
      * Size each order to at most this fraction of the item's HOURLY volume, so
      * orders on liquid (high-demand) items are large but still fill quickly.
