@@ -58,6 +58,7 @@ public class BazaarMacro {
     private boolean serverClosing = false;  // Hypixel restart in progress → pause
     private Object lastWorld = null;         // detect world change (rejoin)
     private boolean inventoryFull = false;   // server said "no space" → sell before claiming
+    private boolean stashPending = false;    // materials went to the stash → recover them
 
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
@@ -172,6 +173,10 @@ public class BazaarMacro {
         } else if (m.contains("space required to claim") || m.contains("don't have the space")
                 || m.contains("inventory is full")) {
             if (!inventoryFull) { inventoryFull = true; note("§einventory full — selling to free space before claiming"); }
+        } else if (m.contains("stashed away")) {
+            // A claim overflowed into the stash — stop claiming, sell, then recover.
+            inventoryFull = true;
+            if (!stashPending) { stashPending = true; note("§ematerials went to stash — will recover after selling"); }
         }
     }
 
@@ -249,6 +254,7 @@ public class BazaarMacro {
         openCooldown = 0;
         serverClosing = false;
         inventoryFull = false;
+        stashPending = false;
         resetDelay();
 
         GuiDump.reset();
@@ -358,11 +364,18 @@ public class BazaarMacro {
         for (ParsedOrder o : grid) {
             if (!o.claimable()) continue;
             if (config.dryRun) { note("DRY: would claim " + o.item()); continue; }
-            // Don't attempt a buy-claim that won't fit ("You don't have the space
-            // required to claim that!"). Skip it — the sell steps free space first.
-            if (o.buy() && !hasSpaceToClaim(mc, o)) {
-                note("§einventory full§r — selling to free space before claiming " + o.item());
-                continue;
+            if (o.buy()) {
+                // BRAIN RULE: never claim more of an item we're still holding
+                // unsold — list what we have first, then claim the next batch.
+                // (Also closes the stale-inventory overflow → stash window.)
+                boolean holdingUnsold = pendingSells.stream().anyMatch(s -> key(s).equals(o.key()));
+                if (holdingUnsold) { statusLine = "listing " + o.item() + " before claiming more"; continue; }
+                // Don't attempt a claim that won't fit ("You don't have the space
+                // required to claim that!"). The sell steps free space first.
+                if (!hasSpaceToClaim(mc, o)) {
+                    note("§einventory full§r — selling to free space before claiming " + o.item());
+                    continue;
+                }
             }
             statusLine = "claiming " + (o.buy() ? "bought " : "sold ") + o.item();
             if (GuiHelper.clickSlotIndex(mc, o.slot())) {
@@ -501,6 +514,18 @@ public class BazaarMacro {
             }
             statusLine = "order slots full — waiting to list " + item;
             // fall through to monitoring; a slot frees when an order completes
+        }
+
+        // 4.5) Sells are done and space is free — recover anything the server
+        //      stashed (/pickupstash); the sweep lists it next pass.
+        if (stashPending && pendingSells.isEmpty() && pendingInstasell == null) {
+            var nh = mc.getNetworkHandler();
+            if (nh != null) {
+                nh.sendChatCommand("pickupstash");
+                log("recovering stashed materials (/pickupstash)");
+            }
+            stashPending = false;
+            return;
         }
 
         // 5) Open a new buy order with the best-ranked flip we don't hold.
