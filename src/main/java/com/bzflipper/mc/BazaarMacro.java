@@ -538,6 +538,7 @@ public class BazaarMacro {
                 // Multiple SELL offers per item are fine — they all sell — and
                 // merging them means cancelling (refund → stash risk) for no gain.
                 if (!o.buy()) continue;
+                if (o.claimable() || prev.claimable()) continue;  // claim first, merge later
                 if (config.dryRun) { note("DRY: would merge duplicate orders of " + o.item()); continue; }
                 // keep the better (higher) priced buy — it's ahead in the queue
                 boolean prevBetter = !Double.isNaN(prev.pricePerUnit())
@@ -560,6 +561,9 @@ public class BazaarMacro {
         //    Skipped while daily-limited (relisting re-creates an order = burns limit).
         for (ParsedOrder o : dailyOk ? grid : List.<ParsedOrder>of()) {
             if (o.filled()) continue;
+            // Clicking a claimable order CLAIMS it instead of opening the cancel
+            // menu — never try to relist one (the claim step handles it first).
+            if (o.claimable()) continue;
             FlipCandidate q = api.quote(o.key());
             if (q == null || Double.isNaN(o.pricePerUnit())) continue;
             boolean beaten = o.buy()
@@ -1130,6 +1134,10 @@ public class BazaarMacro {
 
     private void pCancel(MinecraftClient mc) {
         statusLine = "cancelling " + cancelItem;
+        // If clicking the order claimed it instead of opening "Order Options"
+        // (it was claimable), we're still on the manage screen — bail to PLAN
+        // immediately instead of hunting for a cancel button that isn't there.
+        if (atManage(mc)) { phase = Phase.PLAN; return; }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CANCEL_ORDER)
                 || GuiHelper.clickByName(mc, "cancel")) {
             String key = key(cancelItem);
