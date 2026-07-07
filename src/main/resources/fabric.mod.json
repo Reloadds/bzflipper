@@ -8,6 +8,7 @@
   "contact": {},
   "license": "MIT",
   "environment": "client",
+  "icon": "assets/bzflipper/icon.png",
   "entrypoints": {
     "client": ["com.bzflipper.BzFlipper"]
   },
