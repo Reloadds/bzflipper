@@ -28,8 +28,16 @@ public class FlipConfig {
      *  claims and sells are never slowed by this. */
     public int orderCooldownTicks = 30;
 
-    /** Bazaar sell tax fraction used in margin math (0.0125 = 1.25%). */
+    /** Bazaar sell tax fraction used in margin math (auto-detected in-game). */
     public double taxFraction = 0.0125;
+
+    /** Never list a sell offer below cost — if the competitive price would lose
+     *  money vs what we paid, hold the line at a profitable price instead. */
+    public boolean neverSellAtLoss = true;
+
+    /** Minimum net profit (fraction of buy cost, after tax) to require when the
+     *  loss-guard kicks in. 0 = break-even floor; 0.02 = insist on +2%. */
+    public double minSellMargin = 0.0;
 
     /** How many different items to flip at once. Each uses up to 2 slots (buy +
      *  sell), so it's auto-capped at half your order limit (7 at base, 14 w/ perk). */

@@ -472,6 +472,12 @@ public class BazaarMacro {
                     : q.lowestSellOffer < o.pricePerUnit() - EPS;  // someone offers lower than us
             if (!beaten) continue;
             if (config.dryRun) { note("DRY: would relist " + o.item()); continue; }
+            // Sell-side: don't chase the price DOWN past our cost. If we can't
+            // undercut and still profit, hold the offer where it is.
+            if (!o.buy() && config.neverSellAtLoss) {
+                double floor = minProfitableSell(o.item());
+                if (!Double.isNaN(floor) && q.lowestSellOffer - PriceMath.TICK < floor) continue;
+            }
             // Sell-side cancel refunds items: skip until the refund fits, and
             // don't double-cancel the same offer while the grid catches up.
             if (!o.buy() && (!refundFits(mc, o) || recentlyCancelled(o.item()))) continue;
@@ -921,8 +927,30 @@ public class BazaarMacro {
         }
     }
 
-    /** Sell price: normally "best offer -0.1"; after wars, "10% of spread". */
+    /** Lowest price we can sell {@code item} at without losing money vs what we
+     *  paid (after tax + minSellMargin). NaN if we don't know the buy cost. */
+    private double minProfitableSell(String item) {
+        OrderInfo oi = orders.get(key(item));
+        if (oi == null || Double.isNaN(oi.buyPrice) || oi.buyPrice <= 0) return Double.NaN;
+        return PriceMath.roundToTick(oi.buyPrice * (1 + config.minSellMargin) / (1 - config.taxFraction));
+    }
+
+    /** Sell price: competitive ("best offer -0.1" / "10% of spread"), UNLESS that
+     *  would sell below our cost — then hold the line at a profitable price. */
     private void pSellPrice(MinecraftClient mc) {
+        double floor = config.neverSellAtLoss ? minProfitableSell(activeItem) : Double.NaN;
+
+        // Loss guard: the competitive price (ourSellPrice) is below our profit floor.
+        if (!Double.isNaN(floor) && ourSellPrice < floor) {
+            if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_PRICE)) {
+                ourSellPrice = floor;
+                note(String.format(Locale.ROOT, "§eholding %s at %.1f (cost-protected, market too low)",
+                        activeItem, floor));
+                requestSign(fmt1(floor), Phase.SELL_CONFIRM);
+            }
+            return;
+        }
+
         if (priceAggressively() && GuiHelper.clickByName(mc, BazaarStrings.BTN_SPREAD_SELL)) {
             phase = Phase.SELL_CONFIRM; return;
         }
