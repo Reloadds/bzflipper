@@ -172,6 +172,13 @@ public class FlipConfig {
     /** Hours between cookie-buff checks. */
     public int cookieCheckHours = 6;
 
+    // ---- Web dashboard (localhost) ----
+    /** Serve a live dashboard at http://localhost:{webPort} (localhost-only). */
+    public boolean webDashboard = true;
+
+    /** Dashboard port. */
+    public int webPort = 7654;
+
     /** After this many relists on one item, price aggressively using the Bazaar's
      *  "5%/10% of spread" presets to jump the queue and end +0.1 wars. */
     public int aggressiveAfterRelists = 2;

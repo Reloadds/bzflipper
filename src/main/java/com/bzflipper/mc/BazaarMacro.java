@@ -145,9 +145,17 @@ public class BazaarMacro {
     private boolean stateDirty = false;
     private long lastStateSave = 0;
 
-    // ---- HUD-exposed ----
+    // ---- HUD/dashboard-exposed ----
     public volatile String statusLine = "idle";
     public volatile double allTimeProfit = 0;
+    /** Rolling log for the web dashboard's Chat tab. */
+    public final java.util.concurrent.ConcurrentLinkedDeque<String> logLines =
+            new java.util.concurrent.ConcurrentLinkedDeque<>();
+    /** Dashboard → game-thread requests (handled in BzFlipper's tick). */
+    public final java.util.concurrent.atomic.AtomicBoolean webToggle =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    public final java.util.concurrent.atomic.AtomicBoolean webPanic =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     public volatile double purse = Double.NaN;
     public volatile int buyCount = 0, sellCount = 0;
     public volatile int ordersPlaced = 0, buysFilled = 0, sellsFilled = 0, flipsCompleted = 0;
@@ -1408,7 +1416,24 @@ public class BazaarMacro {
     private void log(String msg) {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player != null) mc.player.sendMessage(Text.literal("§b[BZ] §r" + msg), false);
-        System.out.println("[bzflipper] " + msg.replaceAll("§.", ""));
+        String plain = msg.replaceAll("§.", "");
+        System.out.println("[bzflipper] " + plain);
+        logLines.addLast(new java.text.SimpleDateFormat("HH:mm:ss")
+                .format(new java.util.Date()) + "  " + plain);
+        while (logLines.size() > 300) logLines.pollFirst();
+    }
+
+    public FlipConfig getConfig() { return config; }
+
+    /** Benched (blacklisted) items with minutes remaining, for the dashboard. */
+    public List<String> benchedList() {
+        long now = System.currentTimeMillis();
+        List<String> out = new java.util.ArrayList<>();
+        for (Map.Entry<String, Long> e : blacklistUntil.entrySet()) {
+            long left = e.getValue() - now;
+            if (left > 0) out.add(e.getKey() + " (" + (left / 60_000) + "m)");
+        }
+        return out;
     }
 
     private void note(String msg) {

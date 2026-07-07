@@ -7,6 +7,7 @@ import com.bzflipper.mc.AutoStart;
 import com.bzflipper.mc.BazaarMacro;
 import com.bzflipper.mc.ScoreboardReader;
 import com.bzflipper.track.ProfitTracker;
+import com.bzflipper.web.WebDashboard;
 
 import java.util.Locale;
 import net.fabricmc.api.ClientModInitializer;
@@ -45,6 +46,7 @@ public class BzFlipper implements ClientModInitializer {
         macro = new BazaarMacro(config, api, tracker);
         overlay = new Overlay(macro);
         autoStart = new AutoStart(config, macro);
+        new WebDashboard(config, macro).start();   // http://localhost:{webPort}
 
         if (config.useApiFlips) api.start();
 
@@ -73,6 +75,9 @@ public class BzFlipper implements ClientModInitializer {
     private void onEndTick(MinecraftClient mc) {
         while (toggleKey.wasPressed()) { autoStart.disarm("manual toggle"); macro.toggle(); }
         while (panicKey.wasPressed()) { autoStart.disarm("panic key"); macro.stop("panic key"); }
+        // Dashboard buttons (HTTP thread only sets flags; we act on the game thread).
+        if (macro.webToggle.compareAndSet(true, false)) { autoStart.disarm("web toggle"); macro.toggle(); }
+        if (macro.webPanic.compareAndSet(true, false)) { autoStart.disarm("web panic"); macro.stop("panic (dashboard)"); }
         // Note: dumping is automatic now (GuiDump.autoDump from the macro tick),
         // because keybinds can't fire while a Bazaar GUI is open.
         // Watchdog: kicked to a lobby/limbo mid-session? Stop cleanly and let
