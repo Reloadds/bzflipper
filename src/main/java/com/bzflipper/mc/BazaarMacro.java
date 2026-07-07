@@ -583,10 +583,21 @@ public class BazaarMacro {
             if (o.claimable()) continue;
             FlipCandidate q = api.quote(o.key());
             if (q == null || Double.isNaN(o.pricePerUnit())) continue;
+            // BRAIN: if I already sit AT the top of the book, the "competing" order
+            // is my OWN (I listed this item twice) — that's not a war, don't relist
+            // against myself. Also ignore my other order of the same item.
+            boolean myTwin = grid.stream().anyMatch(g -> g != o && g.buy() == o.buy()
+                    && g.key().equals(o.key())
+                    && (o.buy() ? g.pricePerUnit() >= o.pricePerUnit() - EPS
+                                : g.pricePerUnit() <= o.pricePerUnit() + EPS));
             boolean beaten = o.buy()
                     ? q.topBuyOrder > o.pricePerUnit() + EPS       // someone bids higher than us
                     : q.lowestSellOffer < o.pricePerUnit() - EPS;  // someone offers lower than us
-            if (!beaten) continue;
+            // If the book's best equals our own price (±tick), the "beater" is us.
+            boolean bookIsUs = o.buy()
+                    ? Math.abs(q.topBuyOrder - o.pricePerUnit()) <= PriceMath.TICK + EPS
+                    : Math.abs(q.lowestSellOffer - o.pricePerUnit()) <= PriceMath.TICK + EPS;
+            if (!beaten || myTwin || bookIsUs) continue;
             if (config.dryRun) { note("DRY: would relist " + o.item()); continue; }
             // Sell-side: don't chase the price DOWN past our cost. If we can't
             // undercut and still profit, hold the offer where it is.
