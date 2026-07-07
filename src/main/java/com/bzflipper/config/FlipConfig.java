@@ -132,6 +132,22 @@ public class FlipConfig {
      *  rolling window, don't buy into the drop (protects the sell side). */
     public double crashFilter = 0.08;
 
+    /** Fraction of an item's volume we assume we capture, used to ESTIMATE fill
+     *  rate before we've measured it live. Once measured, the real rate is used. */
+    public double captureFraction = 0.30;
+
+    // ---- Opportunity-cost capital recycling (#2) ----
+    /** Recycle capital stuck in a non-filling sell offer by exiting it, so the
+     *  coins move to higher-velocity flips. Off by default — it CAN realize a
+     *  small loss (bounded by maxExitLossFraction). */
+    public boolean freeStuckCapital = false;
+
+    /** How long a barely-filling sell offer may sit before it's recycle-eligible. */
+    public int maxHoldMinutes = 60;
+
+    /** Max acceptable loss (fraction of cost) when recycling stuck capital. */
+    public double maxExitLossFraction = 0.02;
+
     /** Minimum weekly volume (both sides) for liquidity — avoids dead items. */
     public double apiMinWeeklyVolume = 500_000;
 

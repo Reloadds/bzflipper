@@ -130,6 +130,10 @@ public class BazaarMacro {
     private final Map<String, Double> efficiency = new HashMap<>();
     /** All-time realized profit per item (for the session report best/worst). */
     private final Map<String, Double> itemProfit = new HashMap<>();
+    /** Empirical sell fill-rate (units/hr EMA) per item — the measured throughput. */
+    private final Map<String, Double> fillRate = new HashMap<>();
+    /** Last fill observation per item: [epochMs, filledUnits]. */
+    private final Map<String, double[]> fillObs = new HashMap<>();
     /** Canonical keys of everything we've ever bought — so leftover goods get
      *  sold even if their order was pruned/forgotten. Personal items are never here. */
     private final Set<String> boughtItems = new HashSet<>();
@@ -216,6 +220,7 @@ public class BazaarMacro {
         Set<String> boughtItems = new HashSet<>();
         Map<String, Double> efficiency = new HashMap<>();
         Map<String, Double> itemProfit = new HashMap<>();
+        Map<String, Double> fillRate = new HashMap<>();
         double allTimeProfit = 0;
     }
 
@@ -239,6 +244,7 @@ public class BazaarMacro {
             if (s.boughtItems != null) boughtItems.addAll(s.boughtItems);
             if (s.efficiency != null) efficiency.putAll(s.efficiency);
             if (s.itemProfit != null) itemProfit.putAll(s.itemProfit);
+            if (s.fillRate != null) fillRate.putAll(s.fillRate);
             allTimeProfit = s.allTimeProfit;
             System.out.println("[bzflipper] restored state: " + orders.size()
                     + " orders, " + pendingSells.size() + " pending sells");
@@ -263,6 +269,7 @@ public class BazaarMacro {
             s.boughtItems.addAll(boughtItems);
             s.efficiency.putAll(efficiency);
             s.itemProfit.putAll(itemProfit);
+            s.fillRate.putAll(fillRate);
             s.allTimeProfit = allTimeProfit;
             java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
             stateDirty = false;
@@ -454,6 +461,7 @@ public class BazaarMacro {
         for (String n : invNames) invKeys.add(key(n));
         adoptAndPrune(grid, invKeys);
         sweepLeftovers(invNames, grid);
+        observeFills(grid);
 
         boolean slotFree = grid.size() < orderLimit;                       // 14/21/28
         boolean dailyOk = System.currentTimeMillis() >= dailyLimitUntil;   // daily coin limit
@@ -602,9 +610,36 @@ public class BazaarMacro {
             return;
         }
 
+        long tNow = System.currentTimeMillis();
+
+        // 3.6) Opportunity-cost recycle: a sell offer that's barely filling past
+        //      maxHoldMinutes is dead capital (0 coins/hr). Exit it (bounded loss)
+        //      so the coins move to higher-velocity flips. Opt-in (freeStuckCapital).
+        if (config.freeStuckCapital && dailyOk) {
+            for (ParsedOrder o : grid) {
+                if (o.buy() || o.claimable() || o.filled()) continue;
+                OrderInfo oi = orders.get(o.key());
+                if (oi == null || Double.isNaN(oi.buyPrice)) continue;
+                if (tNow - oi.placedAt < config.maxHoldMinutes * 60_000L) continue;
+                if (o.filledPct() > 20) continue;                    // it IS selling — leave it
+                FlipCandidate q = api.quote(o.key());
+                if (q == null) continue;
+                double exitNet = q.topBuyOrder * (1 - config.taxFraction);   // instasell proceeds/unit
+                double lossFrac = (oi.buyPrice - exitNet) / oi.buyPrice;
+                if (lossFrac > config.maxExitLossFraction) continue;         // loss too big — keep holding
+                if (!refundFits(mc, o) || recentlyCancelled(o.item())) continue;
+                statusLine = "recycling stuck capital: " + o.item();
+                note(String.format(Locale.ROOT, "§erecycling %s (stuck %dm, exit loss %.1f%%)",
+                        o.item(), (tNow - oi.placedAt) / 60_000, lossFrac * 100));
+                cancelIsBuy = false; cancelRebuy = false; cancelBailInstasell = true; cancelSilent = false;
+                cancelItem = o.item(); cancelAmount = o.amount();
+                if (GuiHelper.clickSlotIndex(mc, o.slot())) { markCancelled(o.item()); phase = Phase.CANCEL; }
+                return;
+            }
+        }
+
         // 3.5) Exit dead buy orders: 0% filled after buyStallMinutes means the
         //      coins are doing nothing — cancel, blacklist briefly, redeploy.
-        long tNow = System.currentTimeMillis();
         for (ParsedOrder o : grid) {
             if (!o.buy() || o.filledPct() > 0 || o.claimable()) continue;
             OrderInfo oi = orders.get(o.key());
@@ -858,6 +893,24 @@ public class BazaarMacro {
         return Math.min(even, cap);
     }
 
+    /** Measure how fast our SELL offers actually fill (units/hr), EMA per item.
+     *  This is the ground-truth throughput the ranker uses instead of the book snapshot. */
+    private void observeFills(List<ParsedOrder> grid) {
+        long now = System.currentTimeMillis();
+        for (ParsedOrder o : grid) {
+            if (o.buy()) continue;   // sell throughput is what turns capital over
+            double filled = o.amount() * Math.min(100.0, o.filledPct()) / 100.0;
+            double[] prev = fillObs.put(o.key(), new double[]{now, filled});
+            if (prev == null) continue;
+            double dtHr = (now - prev[0]) / 3_600_000.0;
+            double dFilled = filled - prev[1];
+            if (dtHr < 1e-4 || dFilled < 0) continue;   // new offer / reset — skip this sample
+            double rate = dFilled / dtHr;               // units per hour
+            fillRate.merge(o.key(), rate, (old, r) -> 0.75 * old + 0.25 * r);
+            stateDirty = true;
+        }
+    }
+
     /** Best-ranked candidate we don't already hold, hold pending, or see in the grid. */
     private String pickNextItem(List<ParsedOrder> grid) {
         double spendablePerOrder = perOrderBudget();
@@ -869,6 +922,8 @@ public class BazaarMacro {
         if (config.useApiFlips) {
             if (spendablePerOrder <= 0) return null;
             long now = System.currentTimeMillis();
+            FlipCandidate best = null;
+            double bestCPH = -1;
             for (FlipCandidate c : api.getCandidates()) {
                 String key = key(c.displayName);
                 if (held.contains(key)) continue;
@@ -888,14 +943,25 @@ public class BazaarMacro {
                 // a bigger purse never reduces how many items qualify).
                 double volValue = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
                 if (config.minOrderValue > 0 && volValue < config.minOrderValue) continue;
-                activeHourlyVol = c.hourlyVolume();
-                activeBypassInv = ItemNames.bypassesInventory(c.tag);
-                activeStackSize = ItemNames.stackSize(c.tag);
-                activeVolatility = c.volatility;
-                activeMargin = c.margin(config.taxFraction);
-                return c.displayName;
+
+                // EMPIRICAL coins/hour = profit/unit × MEASURED fill rate (units/hr),
+                // falling back to a volume-based estimate until we've observed it.
+                // Weighted by realized efficiency and momentum. This IS the objective.
+                double ppu = Math.max(0, PriceMath.profitPerUnit(c.topBuyOrder, c.lowestSellOffer, config.taxFraction));
+                Double fr = fillRate.get(key);
+                double rate = (fr != null && fr > 0) ? fr : c.hourlyVolume() * config.captureFraction;
+                double eff = Math.max(0.1, efficiency.getOrDefault(key, 1.0));
+                double trendF = Math.max(0.5, Math.min(1.5, 1 + config.trendWeight * c.trend));
+                double cph = ppu * rate * eff * trendF;
+                if (cph > bestCPH) { bestCPH = cph; best = c; }
             }
-            return null;
+            if (best == null) return null;
+            activeHourlyVol = best.hourlyVolume();
+            activeBypassInv = ItemNames.bypassesInventory(best.tag);
+            activeStackSize = ItemNames.stackSize(best.tag);
+            activeVolatility = best.volatility;
+            activeMargin = best.margin(config.taxFraction);
+            return best.displayName;
         }
         for (FlipTarget t : config.targets) {
             if (!held.contains(key(t.product))) {
