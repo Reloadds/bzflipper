@@ -823,8 +823,16 @@ public class BazaarMacro {
         }
         // (Periodic Manage refresh now runs up front, before the claim/relist
         //  steps, so it can't be starved by a busy pass — see top of pPlan.)
-        statusLine = String.format(Locale.ROOT, "monitoring %dB/%dS — %s",
-                buyCount, sellCount, idleReason());
+        String why = idleReason();
+        statusLine = String.format(Locale.ROOT, "monitoring %dB/%dS — %s", buyCount, sellCount, why);
+        // Surface the reason in the Activity feed too (readable on the dashboard
+        // even while a Bazaar GUI hides the in-game HUD), but only when it changes
+        // and only while the book isn't full — so it explains lulls, not silence.
+        if (!why.equals(lastIdleLogged) && grid.size() < orderLimit - 1
+                && why.startsWith("no new flip")) {
+            lastIdleLogged = why;
+            log("idle — " + why);
+        }
     }
 
     /**
@@ -1039,16 +1047,44 @@ public class BazaarMacro {
         }
     }
 
-    /** Why no new order is being opened right now (for the HUD/status). */
+    /** Why no new order is being opened right now — a precise breakdown so the
+     *  dashboard/HUD explains itself instead of a vague "no new pick". */
     private String idleReason() {
-        if (orders.size() >= Math.max(1, orderLimit - 1)) return "at order cap";
-        if (buyCooldown > 0) return "pacing";
-        if (api.getCandidates().isEmpty()) return "no flips from API yet";
+        long now = System.currentTimeMillis();
+        if (now < dailyLimitUntil)
+            return "daily coin limit — paused " + ((dailyLimitUntil - now) / 60_000 + 1) + "m";
+        if (serverClosing) return "server restarting — paused";
+        if (orders.size() >= Math.max(1, orderLimit - 1)) return "book full (at order cap)";
+        if (buyCooldown > 0) return "pacing (" + buyCooldown + "t)";
+        var cs = api.getCandidates();
+        if (cs.isEmpty()) return "no flips from API yet (age " + api.ageSeconds() + "s)";
         if (Double.isNaN(purse)) return "purse unknown";
-        double spend = (purse - config.coinReserve) * config.orderBudgetFraction;
-        if (spend <= 0) return "nothing spendable";
-        return "no new pick";
+        double spend = perOrderBudget();
+        if (spend <= 0) return "no spendable coins (purse " + String.format(Locale.ROOT, "%,.0f", purse) + ")";
+
+        // Replay pickNextItem's filters just to COUNT why each candidate is out.
+        Set<String> held = new HashSet<>(orders.keySet());
+        for (ParsedOrder o : lastOrders) held.add(o.key());
+        for (String s : pendingSells) held.add(key(s));
+        if (pendingInstasell != null) held.add(key(pendingInstasell));
+        int nHeld = 0, nBench = 0, nPricey = 0, nThin = 0, nOk = 0;
+        for (FlipCandidate c : cs) {
+            String k = key(c.displayName);
+            if (held.contains(k)) { nHeld++; continue; }
+            if (blacklistUntil.getOrDefault(k, 0L) > now
+                    || efficiency.getOrDefault(k, 1.0) < config.minEfficiency) { nBench++; continue; }
+            if (c.ourBuyPrice() > spend) { nPricey++; continue; }
+            double volValue = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
+            if (config.minOrderValue > 0 && volValue < config.minOrderValue) { nThin++; continue; }
+            nOk++;
+        }
+        if (nOk > 0) return nOk + " ready — placing…";
+        return String.format(Locale.ROOT,
+                "no new flip: %d seen · %d held · %d benched · %d too pricey · %d too thin",
+                cs.size(), nHeld, nBench, nPricey, nThin);
     }
+
+    private String lastIdleLogged = "";
 
     /** Coins to commit to the next order: spendable purse split evenly across the
      *  remaining open slots, capped so no single item hogs the book. */
