@@ -80,6 +80,14 @@ public class BazaarMacro {
         return pendingSells.stream().anyMatch(s -> key(s).equals(k));
     }
 
+    /** Remove an item from the sell queue by KEY (name forms differ across grid /
+     *  API / inventory) — an exact removeFirstOccurrence could miss it and leave a
+     *  ghost entry that re-lists a duplicate offer. */
+    private void dequeueSell(String item) {
+        String k = key(item);
+        pendingSells.removeIf(s -> key(s).equals(k));
+    }
+
     private final FlipConfig config;
     private final BazaarApi api;
     private final ProfitTracker tracker;
@@ -136,7 +144,9 @@ public class BazaarMacro {
         double quotedMargin = Double.NaN;   // margin the API quoted when we bought (for efficiency)
         long placedAt = System.currentTimeMillis();
     }
-    private final Map<String, OrderInfo> orders = new HashMap<>();
+    // ConcurrentHashMap: the web dashboard reads this (projectedProfit) from its
+    // HTTP thread while the game thread mutates it — a plain HashMap CMEs.
+    private final Map<String, OrderInfo> orders = new java.util.concurrent.ConcurrentHashMap<>();
     /** Realized-efficiency EMA per item (realized ÷ quoted profit); default 1.0. */
     private final Map<String, Double> efficiency = new HashMap<>();
     /** All-time realized profit per item (for the session report best/worst). */
@@ -151,7 +161,8 @@ public class BazaarMacro {
 
     /** Relist-war protection: per-item relist counts and temporary blacklist. */
     private final Map<String, Integer> relistCounts = new HashMap<>();
-    private final Map<String, Long> blacklistUntil = new HashMap<>();
+    // ConcurrentHashMap: read by the dashboard (benchedList) off the game thread.
+    private final Map<String, Long> blacklistUntil = new java.util.concurrent.ConcurrentHashMap<>();
     private boolean cancelRebuy = true;   // whether pCancel should relist the buy
 
     // ---- Persistence (survives relogs: leftover goods get re-listed) ----
@@ -550,6 +561,11 @@ public class BazaarMacro {
             if (GuiHelper.clickSlotIndex(mc, o.slot())) {
                 lastClaimKey = key(o.item());
                 lastClaimAt = System.currentTimeMillis();
+                // Force the grid to reopen next idle pass: the just-claimed slot
+                // stays "claimable" in the cached grid, and once the 4s cooldown
+                // lapses a stale re-click would open the cancel menu while we'd
+                // wrongly book another claim. A fresh grid clears that window.
+                lastManageRefresh = 0;
                 if (o.buy()) onBuyClaimed(o);
                 else onSellClaimed(o, grid);
             }
@@ -620,7 +636,7 @@ public class BazaarMacro {
                 // Daily coin limit: a new sell offer would fail — instasell instead.
                 pendingInstasell = item;
                 pendingInstasellAmount = Math.max(1, pendingSellAmounts.getOrDefault(key(item), 1));
-                pendingSells.removeFirstOccurrence(item);
+                dequeueSell(item);
                 pendingSellAmounts.remove(key(item));
                 return;
             }
@@ -1150,12 +1166,22 @@ public class BazaarMacro {
             }
             double topBuy = GuiHelper.readCoinPrice(mc, BazaarStrings.BTN_BUY_ORDER, BazaarStrings.LORE_COINS);
             double lowSell = GuiHelper.readCoinPrice(mc, BazaarStrings.BTN_SELL_OFFER, BazaarStrings.LORE_COINS);
+            // Clear first so a failed read can NEVER leak the previous item's price
+            // into this item's sizing/margin math (a stale-low price would grossly
+            // oversize the order).
+            ourBuyPrice = Double.NaN; ourSellPrice = Double.NaN;
             if (!Double.isNaN(topBuy) && !Double.isNaN(lowSell)) {
                 ourBuyPrice = PriceMath.buyOrderPrice(topBuy);
                 ourSellPrice = PriceMath.sellOfferPrice(lowSell);
             } else {
                 FlipCandidate q = api.quote(key(navItem));
                 if (q != null) { ourBuyPrice = q.ourBuyPrice(); ourSellPrice = q.ourSellPrice(); }
+            }
+            // Couldn't price it from either source — don't proceed on nothing; stay
+            // and retry (checkStuck recovers/benches if it never resolves).
+            if (Double.isNaN(ourBuyPrice) || Double.isNaN(ourSellPrice)) {
+                statusLine = "waiting for price on " + navItem;
+                return;
             }
             // SAFETY NET: never BUY an item whose LIVE product margin is out of
             // range (manipulation trap, or navigation landed on the wrong item).
@@ -1272,7 +1298,7 @@ public class BazaarMacro {
                 || GuiHelper.loreOfNamedContains(mc, BazaarStrings.BTN_SELL_OFFER, "none to sell")) {
             note("nothing to sell for " + activeItem + " (likely stashed) — recovering");
             if (activeItem != null) {
-                pendingSells.removeFirstOccurrence(activeItem);
+                dequeueSell(activeItem);
                 pendingSellAmounts.remove(key(activeItem));
             }
             activeItem = null;
@@ -1349,7 +1375,7 @@ public class BazaarMacro {
         ordersPlaced++;
         stateDirty = true;
         inventoryFull = false;   // listing a sell offer moved items out of inventory → space freed
-        pendingSells.removeFirstOccurrence(activeItem);
+        dequeueSell(activeItem);
         pendingSellAmounts.remove(key);
         log(String.format(Locale.ROOT, "§6sell§r %s @ %.1f", activeItem, ourSellPrice));
         activeItem = null;
@@ -1390,7 +1416,7 @@ public class BazaarMacro {
                 // Sell war lost — dump the returned units instantly instead.
                 pendingInstasell = cancelItem;
                 pendingInstasellAmount = Math.max(1, cancelAmount);
-                pendingSells.removeFirstOccurrence(cancelItem);
+                dequeueSell(cancelItem);
                 pendingSellAmounts.remove(key);
                 log("§esell war lost on " + cancelItem + " — instaselling for a clean exit");
                 phase = Phase.PLAN;
