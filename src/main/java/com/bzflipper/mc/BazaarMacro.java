@@ -731,10 +731,13 @@ public class BazaarMacro {
         }
 
         // 5) Open a new buy order with the best-ranked flip we don't hold.
-        //    Cap concurrent flips at half the order limit (each item = buy+sell),
-        //    so it fills all your slots and scales with the Bazaar Flipper perk.
-        int flipCap = Math.min(config.maxOpenOrders, Math.max(1, orderLimit / 2));
-        if (orders.size() < flipCap && buyCooldown <= 0 && slotFree && dailyOk) {
+        //    Utilize the WHOLE Bazaar book (14 slots, or 21/28 with the perk):
+        //    keep placing buys until only one slot is left, kept free so a freshly
+        //    filled buy always has somewhere to list its sell. A buy converts to a
+        //    sell in-place, so we don't need to pre-reserve half the book.
+        int flipCap = Math.max(1, orderLimit - 1);
+        boolean roomForBuy = grid.size() < orderLimit - 1;
+        if (orders.size() < flipCap && buyCooldown <= 0 && roomForBuy && dailyOk) {
             String pick = pickNextItem(grid);
             if (pick != null) {
                 if (config.dryRun) {
@@ -948,7 +951,7 @@ public class BazaarMacro {
 
     /** Why no new order is being opened right now (for the HUD/status). */
     private String idleReason() {
-        if (orders.size() >= config.maxOpenOrders) return "at order cap";
+        if (orders.size() >= Math.max(1, orderLimit - 1)) return "at order cap";
         if (buyCooldown > 0) return "pacing";
         if (api.getCandidates().isEmpty()) return "no flips from API yet";
         if (Double.isNaN(purse)) return "purse unknown";
@@ -962,7 +965,7 @@ public class BazaarMacro {
     private double perOrderBudget() {
         double spendable = purse - config.coinReserve;
         if (Double.isNaN(spendable) || spendable <= 0) return 0;
-        int freeSlots = Math.max(1, config.maxOpenOrders - orders.size());
+        int freeSlots = Math.max(1, (orderLimit - 1) - orders.size());
         double even = spendable / freeSlots;
         double cap = spendable * Math.max(0.05, Math.min(1.0, config.orderBudgetFraction));
         return Math.min(even, cap);

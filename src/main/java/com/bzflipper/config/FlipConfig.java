@@ -39,9 +39,10 @@ public class FlipConfig {
      *  loss-guard kicks in. 0 = break-even floor; 0.02 = insist on +2%. */
     public double minSellMargin = 0.0;
 
-    /** How many different items to flip at once. Each uses up to 2 slots (buy +
-     *  sell), so it's auto-capped at half your order limit (7 at base, 14 w/ perk). */
-    public int maxOpenOrders = 7;
+    /** Deprecated — concurrency now tracks your real Bazaar order limit directly
+     *  (it fills the whole book, 14 base / 21 / 28, keeping one slot free for a
+     *  freshly-filled buy to list its sell). Kept only so old configs still parse. */
+    public int maxOpenOrders = 14;
 
     /** Total order-slot cap (buys + sells). Base 14; Bazaar Flipper perk raises to
      *  21/28. Auto-learned from the "maximum of N Bazaar orders" message. */
