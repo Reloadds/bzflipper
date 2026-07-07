@@ -339,7 +339,7 @@ public class BazaarMacro {
             case BUY_CONFIRM  -> pBuyConfirm(mc);
             // "Create Sell Offer" sells all held items and jumps straight to the
             // price screen — there is NO amount step on the sell side.
-            case SELL_OPEN    -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_OFFER)) phase = Phase.SELL_PRICE; }
+            case SELL_OPEN    -> pSellOpen(mc);
             case SELL_AMOUNT  -> phase = Phase.SELL_PRICE;   // defensive (unused)
             case SELL_PRICE   -> pSellPrice(mc);
             case SELL_CONFIRM -> pSellConfirm(mc);
@@ -884,6 +884,29 @@ public class BazaarMacro {
     private boolean priceAggressively() {
         return activeItem != null && relistCounts.getOrDefault(
                 key(activeItem), 0) >= config.aggressiveAfterRelists;
+    }
+
+    /** Open a sell offer — but bail if we don't actually hold the item (e.g. the
+     *  goods are in the stash), so we never get stuck clicking a dead
+     *  "none in inventory!" button. */
+    private void pSellOpen(MinecraftClient mc) {
+        if (!atProduct(mc)) {
+            if (activeItem != null) startNav(activeItem, Phase.SELL_OPEN); else phase = Phase.PLAN;
+            return;
+        }
+        if (GuiHelper.loreOfNamedContains(mc, BazaarStrings.BTN_SELL_OFFER, "none in inventory")
+                || GuiHelper.loreOfNamedContains(mc, BazaarStrings.BTN_SELL_OFFER, "none to sell")) {
+            note("nothing to sell for " + activeItem + " (likely stashed) — recovering");
+            if (activeItem != null) {
+                pendingSells.removeFirstOccurrence(activeItem);
+                pendingSellAmounts.remove(key(activeItem));
+            }
+            activeItem = null;
+            stashPending = true;   // pull it back from the stash, then it re-lists
+            phase = Phase.PLAN;
+            return;
+        }
+        if (GuiHelper.clickByName(mc, BazaarStrings.BTN_SELL_OFFER)) phase = Phase.SELL_PRICE;
     }
 
     /** Buy price: normally "top order +0.1"; after repeated relist wars, jump the
