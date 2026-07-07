@@ -187,6 +187,11 @@ public class FlipConfig {
     /** How long a relist-war item stays blacklisted (minutes). */
     public int blacklistMinutes = 30;
 
+    /** Brief skip (minutes) when an item's LIVE spread reads momentarily too thin
+     *  at buy time — it usually widens back fast, so don't bench it for the full
+     *  window (only a suspiciously-WIDE spread gets the long bench). */
+    public int marginSkipMinutes = 3;
+
     /** Bench time for items that lose money or capture too little of their quoted
      *  margin — temporarily blacklisted, then given a fresh chance. */
     public int badItemBlacklistMinutes = 45;

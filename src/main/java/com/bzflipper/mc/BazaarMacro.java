@@ -1088,8 +1088,12 @@ public class BazaarMacro {
             if (blacklistUntil.getOrDefault(k, 0L) > now
                     || efficiency.getOrDefault(k, 1.0) < config.minEfficiency) { nBench++; continue; }
             if (c.ourBuyPrice() > spend) { nPricey++; continue; }
-            double volValue = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
-            if (config.minOrderValue > 0 && volValue < config.minOrderValue) { nThin++; continue; }
+            double ppu = Math.max(0, PriceMath.profitPerUnit(c.topBuyOrder, c.lowestSellOffer, config.taxFraction));
+            Double fr = fillRate.get(k);
+            double rate = (fr != null && fr > 0) ? fr : c.hourlyVolume() * config.captureFraction;
+            double grossT = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
+            if (config.minOrderValue > 0 && grossT < config.minOrderValue
+                    && ppu * rate < config.minOrderValue * config.apiMinMargin) { nThin++; continue; }
             nOk++;
         }
         if (nOk > 0) return nOk + " ready — placing…";
@@ -1165,10 +1169,6 @@ public class BazaarMacro {
                     continue;
                 }
                 if (c.ourBuyPrice() > spendablePerOrder) continue;
-                // Skip genuinely thin items (absolute floor, not purse-relative, so
-                // a bigger purse never reduces how many items qualify).
-                double volValue = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
-                if (config.minOrderValue > 0 && volValue < config.minOrderValue) continue;
 
                 // EMPIRICAL coins/hour = profit/unit × MEASURED fill rate (units/hr),
                 // falling back to a volume-based estimate until we've observed it.
@@ -1176,6 +1176,17 @@ public class BazaarMacro {
                 double ppu = Math.max(0, PriceMath.profitPerUnit(c.topBuyOrder, c.lowestSellOffer, config.taxFraction));
                 Double fr = fillRate.get(key);
                 double rate = (fr != null && fr > 0) ? fr : c.hourlyVolume() * config.captureFraction;
+
+                // Liquidity gate — keep an item if it moves enough COINS *or* earns
+                // enough PROFIT/hr. The gross-volume-only floor discarded high-price,
+                // high-margin flips (a 110k item at 6% is worth a slot at modest
+                // volume); requiring one OR the other admits them without letting in
+                // genuinely dead items.
+                double grossThroughput  = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
+                double profitThroughput = ppu * rate;   // coins/hr of realized profit
+                if (config.minOrderValue > 0 && grossThroughput < config.minOrderValue
+                        && profitThroughput < config.minOrderValue * config.apiMinMargin) continue;
+
                 double eff = Math.max(0.1, efficiency.getOrDefault(key, 1.0));
                 double trendF = Math.max(0.5, Math.min(1.5, 1 + config.trendWeight * c.trend));
                 double cph = ppu * rate * eff * trendF;
@@ -1234,13 +1245,20 @@ public class BazaarMacro {
                 return;
             }
             // SAFETY NET: never BUY an item whose LIVE product margin is out of
-            // range (manipulation trap, or navigation landed on the wrong item).
+            // range. Distinguish the two cases instead of benching both for 30m:
+            //   • margin TOO LOW  → the spread is momentarily thin; it widens back
+            //     in seconds, so just skip briefly (marginSkipMinutes) and retry.
+            //   • margin TOO HIGH → that's the manipulation/illiquid trap; bench it
+            //     for the full blacklist window.
             if (navAfter == Phase.BUY_OPEN && !Double.isNaN(ourBuyPrice) && ourBuyPrice > 0) {
                 double m = (ourSellPrice * (1 - config.taxFraction) - ourBuyPrice) / ourBuyPrice;
                 if (m < config.apiMinMargin || m > config.apiMaxMargin) {
-                    note(String.format(Locale.ROOT, "§eskip %s§r: live margin %.0f%% out of range", navItem, m * 100));
-                    blacklistUntil.put(key(navItem),
-                            System.currentTimeMillis() + config.blacklistMinutes * 60_000L);
+                    boolean trap = m > config.apiMaxMargin;
+                    long mins = trap ? config.blacklistMinutes : config.marginSkipMinutes;
+                    note(String.format(Locale.ROOT, "§eskip %s§r: live margin %.1f%% %s — %s %dm",
+                            navItem, m * 100, trap ? "(too wide/trap)" : "(thin right now)",
+                            trap ? "benched" : "retry in", mins));
+                    blacklistUntil.put(key(navItem), System.currentTimeMillis() + mins * 60_000L);
                     activeItem = null;
                     phase = Phase.PLAN;
                     return;
