@@ -1673,10 +1673,31 @@ public class BazaarMacro {
         var cs = api.getCandidates();
         if (!cs.isEmpty()) {
             FlipCandidate c = cs.get(0);
-            topCandidate = String.format(Locale.ROOT, "%s %.1f%% σ%.1f%% %s%.1f%%",
+            topCandidate = String.format(Locale.ROOT, "%s %.1f%% σ%.1f%% %s%.1f%%%s",
                     c.displayName, c.margin(config.taxFraction) * 100, c.volatility * 100,
-                    c.trend >= 0 ? "§a↑§7" : "§c↓§7", Math.abs(c.trend) * 100);
+                    c.trend >= 0 ? "§a↑§7" : "§c↓§7", Math.abs(c.trend) * 100, topStatus(c));
         }
+    }
+
+    /** Why the top-ranked candidate isn't necessarily being bought right now —
+     *  shown after "top:" so the HUD explains itself (it's usually "held": we
+     *  already have an order for it, so we don't place a duplicate). "" if it's
+     *  genuinely the next thing we'd buy. */
+    private String topStatus(FlipCandidate c) {
+        String k = key(c.displayName);
+        long now = System.currentTimeMillis();
+        boolean held = orders.containsKey(k)
+                || lastOrders.stream().anyMatch(o -> o.key().equals(k))
+                || pendingSells.stream().anyMatch(s -> key(s).equals(k));
+        if (held) return " §8·held§7";
+        long bl = blacklistUntil.getOrDefault(k, 0L);
+        if (bl > now) return " §8·benched " + ((bl - now) / 60_000 + 1) + "m§7";
+        if (efficiency.getOrDefault(k, 1.0) < config.minEfficiency) return " §8·low-eff§7";
+        double spend = perOrderBudget();
+        if (spend > 0 && c.ourBuyPrice() > spend) return " §8·too pricey§7";
+        double volValue = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
+        if (config.minOrderValue > 0 && volValue < config.minOrderValue) return " §8·thin§7";
+        return "";   // actionable — this really is the next buy
     }
 
     private int signWaitTicks = 0;
