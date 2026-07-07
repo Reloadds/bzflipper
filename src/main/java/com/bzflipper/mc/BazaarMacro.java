@@ -115,6 +115,9 @@ public class BazaarMacro {
         long placedAt = System.currentTimeMillis();
     }
     private final Map<String, OrderInfo> orders = new HashMap<>();
+    /** Canonical keys of everything we've ever bought — so leftover goods get
+     *  sold even if their order was pruned/forgotten. Personal items are never here. */
+    private final Set<String> boughtItems = new HashSet<>();
 
     /** Relist-war protection: per-item relist counts and temporary blacklist. */
     private final Map<String, Integer> relistCounts = new HashMap<>();
@@ -175,6 +178,7 @@ public class BazaarMacro {
         java.util.List<String> pendingSells = new java.util.ArrayList<>();
         Map<String, Integer> pendingSellAmounts = new HashMap<>();
         Map<String, Long> blacklistUntil = new HashMap<>();
+        Set<String> boughtItems = new HashSet<>();
         double allTimeProfit = 0;
     }
 
@@ -195,6 +199,7 @@ public class BazaarMacro {
             }
             if (s.pendingSellAmounts != null) pendingSellAmounts.putAll(s.pendingSellAmounts);
             if (s.blacklistUntil != null) blacklistUntil.putAll(s.blacklistUntil);
+            if (s.boughtItems != null) boughtItems.addAll(s.boughtItems);
             allTimeProfit = s.allTimeProfit;
             System.out.println("[bzflipper] restored state: " + orders.size()
                     + " orders, " + pendingSells.size() + " pending sells");
@@ -216,6 +221,7 @@ public class BazaarMacro {
             s.pendingSells.addAll(pendingSells);
             s.pendingSellAmounts.putAll(pendingSellAmounts);
             s.blacklistUntil.putAll(blacklistUntil);
+            s.boughtItems.addAll(boughtItems);
             s.allTimeProfit = allTimeProfit;
             java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
             stateDirty = false;
@@ -332,8 +338,11 @@ public class BazaarMacro {
         buyCount = (int) grid.stream().filter(ParsedOrder::buy).count();
         sellCount = grid.size() - buyCount;
 
-        adoptAndPrune(grid);
-        sweepLeftovers(mc, grid);
+        Set<String> invNames = GuiHelper.playerInventoryNames(mc);
+        Set<String> invKeys = new HashSet<>();
+        for (String n : invNames) invKeys.add(key(n));
+        adoptAndPrune(grid, invKeys);
+        sweepLeftovers(invNames, grid);
 
         boolean slotFree = grid.size() < orderLimit;                       // 14/21/28
         boolean dailyOk = System.currentTimeMillis() >= dailyLimitUntil;   // daily coin limit
@@ -510,27 +519,23 @@ public class BazaarMacro {
      * sale. Only items the flipper itself bought are touched; personal items are
      * never auto-sold.
      */
-    private void sweepLeftovers(MinecraftClient mc, List<ParsedOrder> grid) {
-        Set<String> inv = new HashSet<>();
-        for (String n : GuiHelper.playerInventoryNames(mc)) inv.add(key(n));
-        if (inv.isEmpty()) return;
-
-        for (Map.Entry<String, OrderInfo> e : orders.entrySet()) {
-            OrderInfo oi = e.getValue();
-            if (oi.name == null || oi.name.isEmpty()) continue;
-            if (!inv.contains(e.getKey())) continue;                       // not holding it
-            String k = e.getKey();
+    private void sweepLeftovers(Set<String> invNames, List<ParsedOrder> grid) {
+        for (String name : invNames) {
+            String k = key(name);
+            if (!boughtItems.contains(k)) continue;   // only items WE bought — never personal items
             boolean liveSell = grid.stream().anyMatch(g -> !g.buy() && g.key().equals(k));
             boolean queued = pendingSells.stream().anyMatch(s -> key(s).equals(k));
-            if (liveSell || queued) continue;
-            pendingSells.addLast(oi.name);
+            boolean instasell = pendingInstasell != null && key(pendingInstasell).equals(k);
+            boolean active = activeItem != null && key(activeItem).equals(k);
+            if (liveSell || queued || instasell || active) continue;
+            pendingSells.addLast(name);
             stateDirty = true;
-            log("found leftover " + oi.name + " in inventory — queueing sell");
+            log("found leftover " + name + " in inventory — queueing sell");
         }
     }
 
     /** Adopt unknown grid orders (restart recovery) and prune vanished ones. */
-    private void adoptAndPrune(List<ParsedOrder> grid) {
+    private void adoptAndPrune(List<ParsedOrder> grid, Set<String> invKeys) {
         Set<String> seen = new HashSet<>();
         for (ParsedOrder o : grid) {
             seen.add(o.key());
@@ -556,6 +561,7 @@ public class BazaarMacro {
         long now = System.currentTimeMillis();
         orders.entrySet().removeIf(e -> {
             if (seen.contains(e.getKey())) return false;
+            if (invKeys.contains(e.getKey())) return false;   // still holding the goods — keep to sell
             if (pendingSells.stream().anyMatch(s -> key(s).equals(e.getKey()))) return false;
             if (pendingInstasell != null && key(pendingInstasell).equals(e.getKey())) return false;
             if (activeItem != null && key(activeItem).equals(e.getKey())) return false;
@@ -566,6 +572,7 @@ public class BazaarMacro {
     private void onBuyClaimed(ParsedOrder o) {
         OrderInfo oi = orders.computeIfAbsent(o.key(), k -> new OrderInfo());
         if (oi.name == null || oi.name.isEmpty()) oi.name = o.item();
+        boughtItems.add(o.key());
         stateDirty = true;
         if (Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
         if (oi.amount <= 0) oi.amount = o.amount();
@@ -784,6 +791,7 @@ public class BazaarMacro {
             oi.buyPrice = ourBuyPrice;
             oi.amount = activeAmount;
             orders.put(key(activeItem), oi);
+            boughtItems.add(key(activeItem));
             ordersPlaced++;
             stateDirty = true;
             buyCooldown = config.orderCooldownTicks;
