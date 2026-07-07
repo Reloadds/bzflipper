@@ -18,14 +18,15 @@ public class FlipConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     // ---- Behaviour tuning ----
-    /** Ticks between macro actions. 20 ticks = 1 second. Higher = slower & more human. */
-    public int actionDelayTicks = 8;
+    /** Ticks between macro actions (claim/sell/relist/navigate). 20 ticks = 1s. */
+    public int actionDelayTicks = 3;
 
     /** Random extra 0..N ticks added to each delay so timing isn't robotic. */
-    public int actionJitterTicks = 5;
+    public int actionJitterTicks = 2;
 
-    /** Extra pause (ticks) after placing an order before starting the next one. */
-    public int orderCooldownTicks = 40;
+    /** Deliberate pace (ticks) between placing brand-NEW buy orders only — relists,
+     *  claims and sells are never slowed by this. */
+    public int orderCooldownTicks = 30;
 
     /** Bazaar sell tax fraction used in margin math (0.0125 = 1.25%). */
     public double taxFraction = 0.0125;

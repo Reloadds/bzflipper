@@ -44,7 +44,7 @@ public class BazaarMacro {
         IDLE, PLAN, NAV_SEARCH, WAIT_SIGN,
         BUY_OPEN, BUY_AMOUNT, BUY_PRICE, BUY_CONFIRM,
         SELL_OPEN, SELL_AMOUNT, SELL_PRICE, SELL_CONFIRM,
-        SELL_INSTANT, CANCEL
+        SELL_INSTANT, CANCEL, PICKUP_STASH
     }
 
     private static final int STUCK_LIMIT = 40;
@@ -310,6 +310,17 @@ public class BazaarMacro {
             }
             return;
         }
+        // Stash pickup must NOT happen inside a GUI ("You cannot pick these items
+        // up while in an inventory."). Close the bazaar first, then run the command.
+        if (phase == Phase.PICKUP_STASH) {
+            if (GuiHelper.openChest(mc) != null) { mc.setScreen(null); return; }
+            var nh = mc.getNetworkHandler();
+            if (nh != null) { nh.sendChatCommand("pickupstash"); log("recovering stashed materials (/pickupstash)"); }
+            stashPending = false;
+            phase = Phase.PLAN;
+            return;
+        }
+
         if (GuiHelper.openChest(mc) == null) {
             openBazaar(mc);
             return;
@@ -334,6 +345,7 @@ public class BazaarMacro {
             case SELL_CONFIRM -> pSellConfirm(mc);
             case SELL_INSTANT -> pInstasell(mc);
             case CANCEL       -> pCancel(mc);
+            case PICKUP_STASH -> { /* handled before the openChest check */ }
             case IDLE         -> { }
         }
         saveStateIfDue();
@@ -529,12 +541,7 @@ public class BazaarMacro {
         // 4.5) Sells are done and space is free — recover anything the server
         //      stashed (/pickupstash); the sweep lists it next pass.
         if (stashPending && pendingSells.isEmpty() && pendingInstasell == null) {
-            var nh = mc.getNetworkHandler();
-            if (nh != null) {
-                nh.sendChatCommand("pickupstash");
-                log("recovering stashed materials (/pickupstash)");
-            }
-            stashPending = false;
+            phase = Phase.PICKUP_STASH;   // handled in onTick (must close the GUI first)
             return;
         }
 
