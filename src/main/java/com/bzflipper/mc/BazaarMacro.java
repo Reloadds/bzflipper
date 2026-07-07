@@ -735,8 +735,14 @@ public class BazaarMacro {
         //    keep placing buys until only one slot is left, kept free so a freshly
         //    filled buy always has somewhere to list its sell. A buy converts to a
         //    sell in-place, so we don't need to pre-reserve half the book.
-        int flipCap = Math.max(1, orderLimit - 1);
-        boolean roomForBuy = grid.size() < orderLimit - 1;
+        //    Keep ONE slot free only while a sell is imminent (goods queued, or a
+        //    buy that just became claimable) so that sell has somewhere to land —
+        //    otherwise deploy into the entire book to keep it nearing full.
+        boolean sellImminent = !pendingSells.isEmpty()
+                || grid.stream().anyMatch(o -> o.buy() && o.claimable());
+        int reserve = sellImminent ? 1 : 0;
+        int flipCap = Math.max(1, orderLimit - reserve);
+        boolean roomForBuy = grid.size() < orderLimit - reserve;
         if (orders.size() < flipCap && buyCooldown <= 0 && roomForBuy && dailyOk) {
             String pick = pickNextItem(grid);
             if (pick != null) {
