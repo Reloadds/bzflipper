@@ -169,6 +169,10 @@ public class FlipConfig {
      *  avoids tiny 2-5 unit claims and micro sell offers. Full fills always claim. */
     public int minClaimUnits = 64;
 
+    /** Claim a partial fill anyway after it's been claimable this long, so a stalled
+     *  order below minClaimUnits never gets stranded. */
+    public int claimGraceSeconds = 45;
+
     /** Force-refresh the Manage Orders screen every N seconds so fresh fills show
      *  up (Hypixel only updates the grid when the container is re-opened). */
     public int manageRefreshSeconds = 8;

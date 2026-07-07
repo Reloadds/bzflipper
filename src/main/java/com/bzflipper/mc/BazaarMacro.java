@@ -59,6 +59,7 @@ public class BazaarMacro {
     private boolean serverClosing = false;  // Hypixel restart in progress → pause
     private Object lastWorld = null;         // detect world change (rejoin)
     private long lastManageRefresh = 0;      // periodic Manage re-open to catch new fills
+    private final Map<String, Long> firstClaimable = new HashMap<>();  // stall-grace timing
     private boolean inventoryFull = false;   // server said "no space" → sell before claiming
     private boolean stashPending = false;    // materials went to the stash → recover them
 
@@ -460,6 +461,11 @@ public class BazaarMacro {
         Set<String> invNames = GuiHelper.playerInventoryNames(mc);
         Set<String> invKeys = new HashSet<>();
         for (String n : invNames) invKeys.add(key(n));
+        // Break the deadlock: if 'inventory full' is set but there's actually space
+        // now, clear it — otherwise it blocks the very claims needed to free space.
+        if (inventoryFull && GuiHelper.freeInventorySlots(mc) > config.inventoryBuffer + 1) {
+            inventoryFull = false;
+        }
         adoptAndPrune(grid, invKeys);
         sweepLeftovers(invNames, grid);
         observeFills(grid);
@@ -481,11 +487,13 @@ public class BazaarMacro {
             if (!o.claimable()) continue;
             if (config.dryRun) { note("DRY: would claim " + o.item()); continue; }
             if (o.buy()) {
-                // Don't claim a tiny partial fill — wait until enough is ready
-                // (full fills always claim so nothing is left behind).
+                // Batch tiny partials — but never strand a small or stalled order.
                 int ready = o.claimAmount() > 0 ? o.claimAmount()
                         : (int) Math.floor(o.amount() * o.filledPct() / 100.0);
-                if (!o.filled() && ready < config.minClaimUnits) {
+                boolean small = o.amount() <= config.minClaimUnits;   // whole order < threshold
+                long firstSeen = firstClaimable.computeIfAbsent(o.key(), k -> System.currentTimeMillis());
+                boolean stalled = System.currentTimeMillis() - firstSeen > config.claimGraceSeconds * 1000L;
+                if (!o.filled() && !small && !stalled && ready < config.minClaimUnits) {
                     statusLine = "waiting for " + config.minClaimUnits + "× " + o.item() + " (" + ready + " ready)";
                     continue;
                 }
@@ -761,11 +769,11 @@ public class BazaarMacro {
                 || lower.endsWith("essence") || lower.endsWith("shard")) {
             return true;   // goes to storage, not the inventory
         }
-        if (inventoryFull) return false;   // server told us it's full — don't retry until we sell
-        int stack = tag != null ? ItemNames.stackSize(tag) : 64;
-        int amount = o.claimAmount() > 0 ? o.claimAmount() : stack;
-        int needed = Math.max(1, (int) Math.ceil(amount / (double) stack));
-        return GuiHelper.freeInventorySlots(mc) >= needed;
+        if (inventoryFull) return false;   // server-confirmed full — don't retry until we sell
+        // Lenient: just need SOME free space. Pre-computing exact stacks from an
+        // uncertain stack size mis-blocked valid claims (e.g. Soulflow). If a claim
+        // actually overflows, the 'no space'/'stashed' message sets inventoryFull.
+        return GuiHelper.freeInventorySlots(mc) >= 1;
     }
 
     private void sweepLeftovers(Set<String> invNames, List<ParsedOrder> grid) {
@@ -826,6 +834,7 @@ public class BazaarMacro {
         OrderInfo oi = orders.computeIfAbsent(o.key(), k -> new OrderInfo());
         if (oi.name == null || oi.name.isEmpty()) oi.name = o.item();
         boughtItems.add(o.key());
+        firstClaimable.remove(o.key());   // restart batching grace for the next fill
         stateDirty = true;
         if (Double.isNaN(oi.buyPrice)) oi.buyPrice = o.pricePerUnit();
         if (oi.amount <= 0) oi.amount = o.amount();
