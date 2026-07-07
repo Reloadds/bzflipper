@@ -1755,7 +1755,9 @@ public class BazaarMacro {
         return out;
     }
 
-    private void note(String msg) {
+    /** Public so AutoReconnect can surface reconnect status in the Activity feed;
+     *  log() is null-safe, so this works even while disconnected (player == null). */
+    public void note(String msg) {
         if (msg.equals(lastNote)) return;
         lastNote = msg;
         log(msg);

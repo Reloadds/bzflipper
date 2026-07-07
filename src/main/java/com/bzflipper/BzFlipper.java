@@ -3,6 +3,7 @@ package com.bzflipper;
 import com.bzflipper.api.BazaarApi;
 import com.bzflipper.config.FlipConfig;
 import com.bzflipper.hud.Overlay;
+import com.bzflipper.mc.AutoReconnect;
 import com.bzflipper.mc.AutoStart;
 import com.bzflipper.mc.BazaarMacro;
 import com.bzflipper.mc.ScoreboardReader;
@@ -32,6 +33,7 @@ public class BzFlipper implements ClientModInitializer {
     private BazaarMacro macro;
     private Overlay overlay;
     private AutoStart autoStart;
+    private AutoReconnect autoReconnect;
 
     private KeyBinding toggleKey;
     private KeyBinding panicKey;
@@ -46,6 +48,7 @@ public class BzFlipper implements ClientModInitializer {
         macro = new BazaarMacro(config, api, tracker);
         overlay = new Overlay(macro);
         autoStart = new AutoStart(config, macro);
+        autoReconnect = new AutoReconnect(config, macro::note);
         new WebDashboard(config, macro).start();   // http://localhost:{webPort}
 
         if (config.useApiFlips) api.start();
@@ -74,7 +77,7 @@ public class BzFlipper implements ClientModInitializer {
 
     private void onEndTick(MinecraftClient mc) {
         while (toggleKey.wasPressed()) { autoStart.disarm("manual toggle"); macro.toggle(); }
-        while (panicKey.wasPressed()) { autoStart.disarm("panic key"); macro.stop("panic key"); }
+        while (panicKey.wasPressed()) { autoStart.disarm("panic key"); autoReconnect.cancel(); macro.stop("panic key"); }
         // Dashboard buttons (HTTP thread only sets flags; we act on the game thread).
         if (macro.webToggle.compareAndSet(true, false)) { autoStart.disarm("web toggle"); macro.toggle(); }
         if (macro.webPanic.compareAndSet(true, false)) { autoStart.disarm("web panic"); macro.stop("panic (dashboard)"); }
@@ -94,6 +97,7 @@ public class BzFlipper implements ClientModInitializer {
             skyblockLostTicks = 0;
         }
 
+        autoReconnect.tick(mc);   // rejoin after any involuntary disconnect (runs when world == null)
         autoStart.tick(mc);
         macro.onTick(mc);
     }

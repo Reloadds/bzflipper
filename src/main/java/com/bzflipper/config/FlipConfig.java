@@ -222,6 +222,23 @@ public class FlipConfig {
     /** If true, the macro only navigates + reads prices and never places orders. */
     public boolean dryRun = true;
 
+    // ---- Auto-reconnect ----
+    /** Automatically rejoin the server after ANY involuntary disconnect (kick,
+     *  timeout, "you are lagging", server restart, failed transfer). A deliberate
+     *  quit-to-title is never touched, so you can always stop by hand. */
+    public boolean autoReconnect = true;
+
+    /** Seconds before the FIRST reconnect attempt — your window to cancel by
+     *  clicking "Back to title". Repeated failures back off from here. */
+    public int reconnectDelaySeconds = 5;
+
+    /** Backoff ceiling (seconds) between repeated failed reconnects. */
+    public int reconnectMaxDelaySeconds = 60;
+
+    /** Give up after this many consecutive failed attempts. 0 = never give up
+     *  (keep trying forever, one attempt per capped-backoff interval). */
+    public int reconnectMaxAttempts = 0;
+
     // ---- Hands-free startup ----
     /** On Hypixel login: auto /skyblock → wait → /is → wait → start the flipper. */
     public boolean autoStart = true;
