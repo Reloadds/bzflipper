@@ -231,6 +231,18 @@ public class FlipConfig {
      *  capital) and redeploy the coins elsewhere. */
     public int buyStallMinutes = 10;
 
+    /** OPPORTUNITY exits: when the book is FULL, a 0%-filled buy order blocking a
+     *  slot is priced against the best available candidate — exit it early if that
+     *  candidate's expected coins/hr beats the order's by this factor. Buy cancels
+     *  are lossless (full escrow refund, no tax); churn is the only cost. 0 = off
+     *  (only the fixed buyStallMinutes timer applies). */
+    public double opportunityExitFactor = 3.0;
+
+    /** Minimum age (minutes) before a buy order may be opportunity-exited — gives
+     *  every order a fair chance to start filling before it's priced against
+     *  alternatives. */
+    public int opportunityExitMinAgeMinutes = 5;
+
     /** If true, the macro only navigates + reads prices and never places orders.
      *  volatile: the web dashboard toggles this from its HTTP thread; the game
      *  tick loop must see the change promptly and safely. */

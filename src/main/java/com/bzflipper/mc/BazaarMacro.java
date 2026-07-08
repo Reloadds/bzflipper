@@ -888,12 +888,38 @@ public class BazaarMacro {
 
         // 3.5) Exit dead buy orders: 0% filled after buyStallMinutes means the
         //      coins are doing nothing — cancel, blacklist briefly, redeploy.
+        //      PLUS opportunity exits: when the book is FULL the slot itself is
+        //      the scarce resource — price a lagging buy against the best
+        //      available candidate and exit early if it's clearly outclassed
+        //      (buy cancels are lossless; churn is the only cost).
+        double bestAvailCph = -1;   // lazily computed once per pass
         for (ParsedOrder o : grid) {
             if (!o.buy() || o.filledPct() > 0 || o.claimable()) continue;
             OrderInfo oi = orders.get(o.key());
-            if (oi == null || tNow - oi.placedAt < config.buyStallMinutes * 60_000L) continue;
-            if (config.dryRun) { note("DRY: would exit stalled " + o.item()); continue; }
-            statusLine = "stalled " + o.item() + " — freeing capital";
+            if (oi == null) continue;
+            long age = tNow - oi.placedAt;
+            boolean timerExit = age >= config.buyStallMinutes * 60_000L;
+            boolean oppExit = false;
+            double mine = 0;
+            if (!timerExit && config.opportunityExitFactor > 0 && !slotFree
+                    && age >= config.opportunityExitMinAgeMinutes * 60_000L) {
+                if (bestAvailCph < 0) bestAvailCph = ranking.stream()
+                        .filter(r -> "ok".equals(r.state()))
+                        .mapToDouble(RankRow::cph).max().orElse(0);
+                FlipCandidate q = api.quote(o.key());
+                mine = q != null ? scoreCandidate(q)[4] : 0;
+                oppExit = bestAvailCph > config.opportunityExitFactor * Math.max(1, mine);
+            }
+            if (!timerExit && !oppExit) continue;
+            if (config.dryRun) {
+                note("DRY: would exit " + (oppExit ? "outclassed " : "stalled ") + o.item());
+                continue;
+            }
+            statusLine = (oppExit ? "slot has better use — exiting " : "stalled ")
+                    + o.item() + " — freeing capital";
+            if (oppExit) note(String.format(Locale.ROOT,
+                    "§eopportunity exit %s (%dm old, ~%,.0f/hr vs best %,.0f/hr)",
+                    o.item(), age / 60_000, mine, bestAvailCph));
             cancelIsBuy = true;
             cancelRebuy = false;               // pCancel blacklists + drops it
             cancelBailInstasell = false;
