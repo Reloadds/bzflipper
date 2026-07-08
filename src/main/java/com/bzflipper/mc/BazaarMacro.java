@@ -1292,7 +1292,7 @@ public class BazaarMacro {
         if (now - lastRankingBuild < 2_000) return;
         lastRankingBuild = now;
         var cs = api.getCandidates();
-        List<RankRow> rows = new ArrayList<>(cs.size());
+        List<RankRow> rows = new java.util.ArrayList<>(cs.size());
         double liquidity = 0;
         for (FlipCandidate c : cs) {
             String k = key(c.displayName);
