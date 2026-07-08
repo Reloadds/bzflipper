@@ -2,7 +2,15 @@ name: Build
 
 on:
   push:
+    tags:
+      - 'v*'
+    branches:
+      - '**'
   workflow_dispatch:
+
+# Allow the release step to create/attach to GitHub Releases.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -65,3 +73,16 @@ jobs:
           name: bzflipper-jar
           path: build/libs/*.jar
           if-no-files-found: error
+
+      # When the push is a version tag (e.g. v0.1.0), publish a GitHub Release
+      # with the built jars attached for direct download.
+      - name: Publish Release
+        if: success() && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            build/libs/*.jar
+          fail_on_unmatched_files: true
