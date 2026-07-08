@@ -86,6 +86,20 @@ public final class PriceMath {
         return Math.max(0, margin) * liquidity;
     }
 
+    /**
+     * Capital velocity of a flip whose two legs run IN SERIES: units flow through
+     * the buy leg at {@code buyRate} u/hr, then the sell leg at {@code sellRate}.
+     * Steady-state throughput of a two-stage pipeline is the harmonic combination
+     *   v = 1 / (1/buyRate + 1/sellRate)
+     * A flip is only as fast as BOTH legs together: an item that sells instantly
+     * but buys at a trickle (or vice versa) is correctly punished, where ranking
+     * on one leg alone overrates it. Returns 0 if either leg is stalled.
+     */
+    public static double seriesVelocity(double buyRate, double sellRate) {
+        if (buyRate <= 0 || sellRate <= 0) return 0;
+        return 1.0 / (1.0 / buyRate + 1.0 / sellRate);
+    }
+
     /** Max whole units affordable for {@code spendableCoins} at {@code unitBuyPrice}, capped. */
     public static int affordableUnits(double spendableCoins, double unitBuyPrice, int cap) {
         if (unitBuyPrice <= 0 || spendableCoins <= 0) return 0;

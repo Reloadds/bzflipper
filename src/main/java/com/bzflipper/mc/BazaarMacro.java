@@ -167,7 +167,10 @@ public class BazaarMacro {
     /** Empirical sell fill-rate (units/hr EMA) per item — the measured throughput.
      *  ConcurrentHashMap: read by the dashboard (rank/order rows) off the game thread. */
     private final Map<String, Double> fillRate = new java.util.concurrent.ConcurrentHashMap<>();
-    /** Last fill observation per item: [epochMs, filledUnits]. */
+    /** Empirical BUY-order fill-rate (units/hr EMA) per item — the other half of
+     *  the round trip; ranking uses the series velocity of both legs. */
+    private final Map<String, Double> buyFillRate = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Last fill observation per side+item ("B|key"/"S|key"): [epochMs, filledUnits]. */
     private final Map<String, double[]> fillObs = new HashMap<>();
     /** Canonical keys of everything we've ever bought — so leftover goods get
      *  sold even if their order was pruned/forgotten. Personal items are never here. */
@@ -208,7 +211,8 @@ public class BazaarMacro {
      *  Built by the SAME scoring code pickNextItem uses, so what you see in
      *  dry-run is exactly what the picker acts on (this is how ranking changes
      *  get verified before going live). */
-    public record RankRow(String item, double ppu, double sellRate, boolean measured,
+    public record RankRow(String item, double ppu, double buyRate, boolean buyMeasured,
+                          double sellRate, boolean sellMeasured, double velocity,
                           double eff, double cph, String state) {}
     public volatile List<RankRow> ranking = List.of();
     private long lastRankingBuild = 0;
@@ -275,6 +279,7 @@ public class BazaarMacro {
         Map<String, Double> efficiency = new HashMap<>();
         Map<String, Double> itemProfit = new HashMap<>();
         Map<String, Double> fillRate = new HashMap<>();
+        Map<String, Double> buyFillRate = new HashMap<>();
         double allTimeProfit = 0;
         /** [epochMs, coins/hr] market-liquidity samples — regime-detection baseline. */
         java.util.List<double[]> liquiditySamples = new java.util.ArrayList<>();
@@ -305,6 +310,9 @@ public class BazaarMacro {
             if (s.fillRate != null) s.fillRate.forEach((k, v) -> {
                 if (v != null && v >= 1.0) fillRate.put(k, v);
             });
+            if (s.buyFillRate != null) s.buyFillRate.forEach((k, v) -> {
+                if (v != null && v >= 1.0) buyFillRate.put(k, v);
+            });
             allTimeProfit = s.allTimeProfit;
             if (s.liquiditySamples != null) liquiditySamples.addAll(s.liquiditySamples);
             System.out.println("[bzflipper] restored state: " + orders.size()
@@ -331,6 +339,7 @@ public class BazaarMacro {
             s.efficiency.putAll(efficiency);
             s.itemProfit.putAll(itemProfit);
             s.fillRate.putAll(fillRate);
+            s.buyFillRate.putAll(buyFillRate);
             s.allTimeProfit = allTimeProfit;
             s.liquiditySamples.addAll(liquiditySamples);
             java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
@@ -346,6 +355,12 @@ public class BazaarMacro {
      *  Dashboard-safe: fillRate is a ConcurrentHashMap. */
     public double measuredSellRate(String item) {
         Double r = fillRate.get(key(item));
+        return r != null ? r : 0;
+    }
+
+    /** Measured buy-order fill-rate (units/hr EMA) for an item, or 0. */
+    public double measuredBuyRate(String item) {
+        Double r = buyFillRate.get(key(item));
         return r != null ? r : 0;
     }
 
@@ -1216,12 +1231,11 @@ public class BazaarMacro {
             if (blacklistUntil.getOrDefault(k, 0L) > now
                     || efficiency.getOrDefault(k, 1.0) < config.minEfficiency) { nBench++; continue; }
             if (c.ourBuyPrice() > spend) { nPricey++; continue; }
-            double ppu = Math.max(0, PriceMath.profitPerUnit(c.topBuyOrder, c.lowestSellOffer, config.taxFraction));
-            Double fr = fillRate.get(k);
-            double rate = (fr != null && fr > 0) ? fr : c.hourlyVolume() * config.captureFraction;
+            // Same code path as pickNextItem's gate — keep the counts truthful.
+            double[] s = scoreCandidate(c);
             double grossT = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
             if (config.minOrderValue > 0 && grossT < config.minOrderValue
-                    && ppu * rate < config.minOrderValue * config.apiMinMargin) { nThin++; continue; }
+                    && s[0] * s[7] < config.minOrderValue * config.apiMinMargin) { nThin++; continue; }
             nOk++;
         }
         if (nOk > 0) return nOk + " ready — placing…";
@@ -1250,21 +1264,24 @@ public class BazaarMacro {
      *  window instead so the rate reflects actual throughput. */
     private static final long FILL_WINDOW_MS = 60_000;
 
-    /** Measure how fast our SELL offers actually fill (units/hr), EMA per item.
-     *  This is the ground-truth throughput the ranker uses instead of the book snapshot. */
+    /** Measure how fast our orders actually fill (units/hr), EMA per item and SIDE.
+     *  Sell throughput turns capital over; buy throughput is the other half of the
+     *  round trip — the ranker combines both legs into a series velocity. These
+     *  ground-truth rates override the volume-based estimates as data accumulates. */
     private void observeFills(List<ParsedOrder> grid) {
         long now = System.currentTimeMillis();
         for (ParsedOrder o : grid) {
-            if (o.buy()) continue;   // sell throughput is what turns capital over
+            Map<String, Double> target = o.buy() ? buyFillRate : fillRate;
+            String obsKey = (o.buy() ? "B|" : "S|") + o.key();
             double filled = o.amount() * Math.min(100.0, o.filledPct()) / 100.0;
-            double[] prev = fillObs.get(o.key());
-            if (prev == null) { fillObs.put(o.key(), new double[]{now, filled}); continue; }
+            double[] prev = fillObs.get(obsKey);
+            if (prev == null) { fillObs.put(obsKey, new double[]{now, filled}); continue; }
             double dFilled = filled - prev[1];
-            if (dFilled < 0) { fillObs.put(o.key(), new double[]{now, filled}); continue; }  // relisted — new baseline
+            if (dFilled < 0) { fillObs.put(obsKey, new double[]{now, filled}); continue; }  // relisted — new baseline
             if (now - prev[0] < FILL_WINDOW_MS) continue;   // window not elapsed — keep accumulating
-            fillObs.put(o.key(), new double[]{now, filled});
+            fillObs.put(obsKey, new double[]{now, filled});
             double rate = dFilled / ((now - prev[0]) / 3_600_000.0);   // units per hour
-            fillRate.merge(o.key(), rate, (old, r) -> 0.75 * old + 0.25 * r);
+            target.merge(o.key(), rate, (old, r) -> 0.75 * old + 0.25 * r);
             stateDirty = true;
         }
     }
@@ -1272,17 +1289,28 @@ public class BazaarMacro {
     /** THE objective function, in one place: expected realized coins/hour for one
      *  order slot of this candidate. Used by pickNextItem to choose AND by the
      *  ranking snapshot the dashboard shows — never let the two drift apart.
-     *  Returns {ppu, rate, measured(0/1), eff, cph}. */
+     *
+     *  TWO-SIDED: a flip's cycle time is buy-fill + sell-fill IN SERIES, so cph
+     *  uses the series velocity of both legs — an item whose sells fly but whose
+     *  buy order sits for hours parks capital and now ranks accordingly (ranking
+     *  the sell leg alone overrated such items). Each leg falls back to the
+     *  correct opposite-flow volume estimate until measured.
+     *  Returns {ppu, sellRate, sellMeasured, eff, cph, buyRate, buyMeasured, velocity}. */
     private double[] scoreCandidate(FlipCandidate c) {
         String key = key(c.displayName);
         double ppu = Math.max(0, PriceMath.profitPerUnit(c.topBuyOrder, c.lowestSellOffer, config.taxFraction));
-        Double fr = fillRate.get(key);
-        boolean measured = fr != null && fr > 0;
-        double rate = measured ? fr : c.hourlyVolume() * config.captureFraction;
+        Double sf = fillRate.get(key);
+        boolean sellMeasured = sf != null && sf > 0;
+        double sellRate = sellMeasured ? sf : c.sellLegHourly() * config.captureFraction;
+        Double bf = buyFillRate.get(key);
+        boolean buyMeasured = bf != null && bf > 0;
+        double buyRate = buyMeasured ? bf : c.buyLegHourly() * config.captureFraction;
+        double velocity = PriceMath.seriesVelocity(buyRate, sellRate);
         double eff = Math.max(0.1, efficiency.getOrDefault(key, 1.0));
         double trendF = Math.max(0.5, Math.min(1.5, 1 + config.trendWeight * c.trend));
-        double cph = ppu * rate * eff * trendF;
-        return new double[]{ppu, rate, measured ? 1 : 0, eff, cph};
+        double cph = ppu * velocity * eff * trendF;
+        return new double[]{ppu, sellRate, sellMeasured ? 1 : 0, eff, cph,
+                buyRate, buyMeasured ? 1 : 0, velocity};
     }
 
     /** Rebuild the dashboard's ranking snapshot (throttled — cheap but no need to
@@ -1304,7 +1332,8 @@ public class BazaarMacro {
             else if (blacklistUntil.getOrDefault(k, 0L) > now) state = "benched";
             else if (efficiency.getOrDefault(k, 1.0) < config.minEfficiency) state = "low-eff";
             else if (c.ourBuyPrice() > perOrderBudget()) state = "too pricey";
-            rows.add(new RankRow(c.displayName, s[0], s[1], s[2] > 0, s[3], s[4], state));
+            rows.add(new RankRow(c.displayName, s[0], s[5], s[6] > 0, s[1], s[2] > 0,
+                    s[7], s[3], s[4], state));
         }
         rows.sort((a, b) -> Double.compare(b.cph(), a.cph()));
         ranking = List.copyOf(rows);
@@ -1349,7 +1378,7 @@ public class BazaarMacro {
                 // EMPIRICAL coins/hour — scoreCandidate() IS the objective (shared
                 // with the dashboard's ranking snapshot; keep them one code path).
                 double[] s = scoreCandidate(c);
-                double ppu = s[0], rate = s[1], cph = s[4];
+                double ppu = s[0], cph = s[4], velocity = s[7];
 
                 // Liquidity gate — keep an item if it moves enough COINS *or* earns
                 // enough PROFIT/hr. The gross-volume-only floor discarded high-price,
@@ -1357,7 +1386,7 @@ public class BazaarMacro {
                 // volume); requiring one OR the other admits them without letting in
                 // genuinely dead items.
                 double grossThroughput  = c.hourlyVolume() * config.orderVolumeFraction * c.ourBuyPrice();
-                double profitThroughput = ppu * rate;   // coins/hr of realized profit
+                double profitThroughput = ppu * velocity;   // coins/hr of realized profit (both legs)
                 if (config.minOrderValue > 0 && grossThroughput < config.minOrderValue
                         && profitThroughput < config.minOrderValue * config.apiMinMargin) continue;
 

@@ -42,6 +42,18 @@ public class FlipCandidate {
     public double minWeeklyVolume()  { return Math.min(buyWeekVolume, sellWeekVolume); }
     public double hourlyVolume()     { return minWeeklyVolume() / 168.0; }
 
+    /**
+     * Per-leg flow estimates (units/hr). The two legs are fed by OPPOSITE market
+     * flows, following the same inversion convention as quick_status prices
+     * (buy* names ~ the sell-offer side):
+     *   - our BUY order is consumed by INSTASELLERS  → sellMovingWeek
+     *   - our SELL offer is consumed by INSTABUYERS  → buyMovingWeek
+     * Estimates only — measured per-item EMAs override these once fills are
+     * observed, so a wrong split self-corrects with data.
+     */
+    public double buyLegHourly()  { return sellWeekVolume / 168.0; }
+    public double sellLegHourly() { return buyWeekVolume / 168.0; }
+
     /** Estimated hours for {@code units} to fill at the front of the book. */
     public double fillTimeHours(int units) {
         double v = hourlyVolume();
