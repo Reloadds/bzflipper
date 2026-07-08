@@ -127,7 +127,7 @@ public class BazaarMacro {
     private int activeAmount = 0;
     private double activeHourlyVol = Double.MAX_VALUE;
     private int activeStackSize = 64;         // for inventory-fit sizing
-    private boolean activeBypassInv = false;  // essence/shards bypass inventory
+    private boolean activeBypassInv = false;  // essence bypasses inventory (shards do NOT)
     private double activeVolatility = 0;      // σ of the item being bought (for Kelly)
     private double activeMargin = 0;          // quoted margin of the item being bought
 
@@ -234,6 +234,8 @@ public class BazaarMacro {
         } else if (m.contains("space required to claim") || m.contains("don't have the space")
                 || m.contains("inventory is full")) {
             if (!inventoryFull) { inventoryFull = true; note("§einventory full — selling to free space before claiming"); }
+            // The click that triggered this was a FAILED claim — undo its bookkeeping.
+            rollbackRefusedClaim();
         } else if (m.contains("consumed") && m.contains("booster cookie")) {
             note("§acookie consumed — buff renewed!");
             cookieStatus = "~4d";
@@ -597,8 +599,10 @@ public class BazaarMacro {
                 if (holdingUnsold) { statusLine = "listing " + o.item() + " before claiming more"; continue; }
                 // Don't attempt a claim that won't fit ("You don't have the space
                 // required to claim that!"). The sell steps free space first.
+                // statusLine, not note(): this branch repeats every pass while
+                // full — chat gets ONE message when the flag latches, not spam.
                 if (!hasSpaceToClaim(mc, o)) {
-                    note("§einventory full§r — selling to free space before claiming " + o.item());
+                    statusLine = "inventory full — listing sells before claiming " + o.item();
                     continue;
                 }
             }
@@ -909,11 +913,12 @@ public class BazaarMacro {
     private boolean refundFits(MinecraftClient mc, ParsedOrder sellOrder) {
         FlipCandidate q = api.quote(sellOrder.item());
         String tag = q != null ? q.tag : null;
-        // Essence/shards refund to storage, not the inventory — they always fit, so
-        // their sell offers can be merged/relisted regardless of free slots.
+        // Essence refunds to essence storage, not the inventory — always fits, so
+        // its sell offers can be merged/relisted regardless of free slots.
+        // (Shards do NOT get this bypass: their refunds are real item stacks —
+        // same wrong assumption that caused the claim-spam incident.)
         String lower = sellOrder.item().toLowerCase(Locale.ROOT);
-        if ((tag != null && ItemNames.bypassesInventory(tag))
-                || lower.endsWith("essence") || lower.endsWith("shard")) {
+        if ((tag != null && ItemNames.bypassesInventory(tag)) || lower.endsWith("essence")) {
             return true;
         }
         if (inventoryFull) return false;
@@ -942,6 +947,15 @@ public class BazaarMacro {
     private String lastClaimKey = null;
     private long lastClaimAt = 0;
 
+    // Rollback info for the last BUY claim: a successful click is NOT a successful
+    // claim — the server can refuse it ("You don't have the space required to claim
+    // that!"). When that message arrives, these deltas undo the bookkeeping the
+    // click optimistically recorded, so refused claims can't queue phantom sells
+    // or inflate the claim counters.
+    private int lastClaimUnits = 0;        // units merged into pendingSellAmounts
+    private int lastClaimApplied = 0;      // delta actually applied to claimedSoFar
+    private boolean lastClaimAddedPending = false;  // did this claim add the pendingSells entry?
+
     private boolean recentlyCancelled(String item) {
         return key(item).equals(lastCancelKey)
                 && System.currentTimeMillis() - lastCancelAt < 5_000;
@@ -952,16 +966,22 @@ public class BazaarMacro {
         lastCancelAt = System.currentTimeMillis();
     }
 
-    /** Enough inventory space to claim this buy order? Essence/shards bypass it. */
+    /** Enough inventory space to claim this buy order? Essence bypasses it.
+     *
+     *  HARD GATE FIRST: once the server has said "no space", NO buy claim runs —
+     *  not even a believed-bypassing one — until selling/listing frees space and
+     *  clears the flag. The server's word always beats our storage heuristics;
+     *  this is what stops any repeat of the shard claim-spam incident (shards were
+     *  wrongly assumed to bypass, so the bypass short-circuit here kept re-clicking
+     *  refused claims forever while the inventory stayed full). */
     private boolean hasSpaceToClaim(MinecraftClient mc, ParsedOrder o) {
+        if (inventoryFull) return false;   // server-confirmed full — sell first, then claim
         FlipCandidate q = api.quote(o.item());
         String tag = q != null ? q.tag : null;
-        String lower = o.item().toLowerCase(Locale.ROOT);
         if ((tag != null && ItemNames.bypassesInventory(tag))
-                || lower.endsWith("essence") || lower.endsWith("shard")) {
-            return true;   // goes to storage, not the inventory
+                || o.item().toLowerCase(Locale.ROOT).endsWith("essence")) {
+            return true;   // essence is a currency — never enters the inventory
         }
-        if (inventoryFull) return false;   // server-confirmed full — don't retry until we sell
         // Lenient: just need SOME free space. Pre-computing exact stacks from an
         // uncertain stack size mis-blocked valid claims (e.g. Soulflow). If a claim
         // actually overflows, the 'no space'/'stashed' message sets inventoryFull.
@@ -1038,14 +1058,46 @@ public class BazaarMacro {
         // Units this claim banks: the grid tells us exactly ("N items to claim").
         int newUnits = o.claimAmount() > 0 ? o.claimAmount()
                 : Math.max(1, (int) Math.floor(o.amount() * o.filledPct() / 100.0) - oi.claimedSoFar);
+        int before = oi.claimedSoFar;
         oi.claimedSoFar = Math.min(Math.max(o.amount(), 1), oi.claimedSoFar + newUnits);
 
         buysFilled++;
-        if (!queuedForSell(o.item())) pendingSells.addLast(o.item());
+        boolean addedPending = !queuedForSell(o.item());
+        if (addedPending) pendingSells.addLast(o.item());
         pendingSellAmounts.merge(o.key(), newUnits, Integer::sum);
+        // Remember exactly what this claim recorded, so a server refusal ("no
+        // space") arriving moments later can roll it back (see rollbackRefusedClaim).
+        lastClaimUnits = newUnits;
+        lastClaimApplied = oi.claimedSoFar - before;
+        lastClaimAddedPending = addedPending;
         log("claimed " + newUnits + "× " + o.item()
                 + (o.filled() ? "" : String.format(Locale.ROOT, " (%.0f%% filled)", o.filledPct()))
                 + " — will list for sale");
+    }
+
+    /** The server refused the claim we just clicked (no inventory space) — undo the
+     *  bookkeeping onBuyClaimed recorded optimistically. Without this, every refused
+     *  claim queues phantom units for sale and inflates the claim/fill counters
+     *  (exactly what happened in the shard claim-spam incident). One-shot per claim. */
+    private void rollbackRefusedClaim() {
+        if (lastClaimKey == null || lastClaimUnits <= 0
+                || System.currentTimeMillis() - lastClaimAt > 5_000) return;
+        OrderInfo oi = orders.get(lastClaimKey);
+        if (oi != null) oi.claimedSoFar = Math.max(0, oi.claimedSoFar - lastClaimApplied);
+        Integer left = pendingSellAmounts.merge(lastClaimKey, -lastClaimUnits, Integer::sum);
+        if (left == null || left <= 0) {
+            pendingSellAmounts.remove(lastClaimKey);
+            // Only drop the queue entry if THIS claim created it; sweepLeftovers
+            // re-queues anything genuinely sitting in the inventory anyway.
+            if (lastClaimAddedPending) {
+                String k = lastClaimKey;
+                pendingSells.removeIf(s -> key(s).equals(k));
+            }
+        }
+        buysFilled = Math.max(0, buysFilled - 1);
+        log("§eclaim refused (no space) — rolled back " + lastClaimUnits + "× " + lastClaimKey);
+        lastClaimUnits = 0;   // one-shot: don't roll back twice on a repeated message
+        stateDirty = true;
     }
 
     private void onSellClaimed(ParsedOrder o, List<ParsedOrder> grid) {
@@ -1353,9 +1405,9 @@ public class BazaarMacro {
                 ? config.maxUnitsPerOrder
                 : (int) Math.max(1, activeHourlyVol * config.orderVolumeFraction);
 
-        // Inventory-fit cap: essences/shards bypass inventory (unlimited); other
-        // items must fit in free slots × stack size so a full claim never overflows
-        // to the stash.
+        // Inventory-fit cap: essence bypasses inventory (unlimited); everything
+        // else — INCLUDING shards, which land as real stacks — must fit in free
+        // slots × stack size so a full claim never overflows or gets refused.
         int byInv = Integer.MAX_VALUE;
         if (config.capByInventory && !activeBypassInv) {
             int free = Math.max(0, GuiHelper.freeInventorySlots(mc) - config.inventoryBuffer);

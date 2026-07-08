@@ -41,10 +41,17 @@ public final class ItemNames {
         MATERIAL = mats;
     }
 
-    /** True if claiming this item bypasses the inventory (essences → essence
-     *  storage, shards → attribute storage), so no inventory limit applies. */
+    /** True if claiming this item bypasses the inventory (essences are a currency
+     *  → essence storage; no physical item ever enters the inventory).
+     *
+     *  SHARDS DO NOT BYPASS: claiming a SHARD_* buy order puts real item stacks in
+     *  the player inventory (confirmed live — a 1713× shard claim filled it and the
+     *  server refused further claims with "You don't have the space required").
+     *  Listing them here caused claims to skip every inventory-space guard AND
+     *  orders to be sized with no inventory cap. Only add a family here when it is
+     *  CERTAIN no physical item lands in the inventory. */
     public static boolean bypassesInventory(String tag) {
-        return tag != null && (tag.startsWith("ESSENCE_") || tag.startsWith("SHARD_"));
+        return tag != null && tag.startsWith("ESSENCE_");
     }
 
     /** Best-effort stack size: 1 for enchanted books and gear/tools/skull items,

@@ -74,7 +74,8 @@ public class FlipConfig {
     public int maxUnitsPerOrder = 71_680;
 
     /** Cap orders so claimed items fit in inventory (avoids overflow to stash).
-     *  Essences/shards bypass inventory and are never capped. */
+     *  Essence bypasses inventory and is never capped (shards do NOT bypass —
+     *  they land as real item stacks). */
     public boolean capByInventory = true;
 
     /** Keep this many inventory slots free as a buffer when sizing by inventory. */
