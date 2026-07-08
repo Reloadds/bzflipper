@@ -3,7 +3,8 @@
   "package": "com.bzflipper.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "AbstractSignEditScreenAccessor"
+    "AbstractSignEditScreenAccessor",
+    "DisconnectedScreenAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

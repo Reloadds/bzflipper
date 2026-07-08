@@ -1,6 +1,7 @@
 package com.bzflipper.mc;
 
 import com.bzflipper.config.FlipConfig;
+import com.bzflipper.mixin.DisconnectedScreenAccessor;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.DisconnectedScreen;
 import net.minecraft.client.gui.screen.Screen;
@@ -9,6 +10,7 @@ import net.minecraft.client.gui.screen.multiplayer.ConnectScreen;
 import net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen;
 import net.minecraft.client.network.ServerAddress;
 import net.minecraft.client.network.ServerInfo;
+import net.minecraft.network.DisconnectionInfo;
 
 import java.util.function.Consumer;
 
@@ -23,6 +25,16 @@ import java.util.function.Consumer;
  * quit. In-server relocations (sent to a lobby/limbo, which keep the connection
  * alive) never hit this screen — the macro's own watchdog + AutoStart handle
  * those by walking SkyBlock → island → resume.
+ *
+ * Reason-aware policy ({@link DisconnectClassifier}): we read the reason text off
+ * the DisconnectedScreen and pick per close —
+ *   STOP      (ban / staff kick / duplicate login / version / bad session):
+ *             don't reconnect; coming straight back after a staff kick is a red
+ *             flag and rejoining won't fix an auth/version problem anyway.
+ *   BACKOFF   (server full / restarting / auth down / join hiccup): retry, but
+ *             wait the full {@code reconnectMaxDelaySeconds} first.
+ *   RECONNECT (everything else — timeout, connection lost, lag/AFK kick): rejoin
+ *             promptly. Unknown reasons fall here, so a transient drop always retries.
  *
  * Escape hatch: the first attempt waits {@code reconnectDelaySeconds}. Clicking
  * "Back to title" during that countdown moves off the DisconnectedScreen and
@@ -83,9 +95,23 @@ public class AutoReconnect {
                 log("gave up reconnecting after " + attempts + " attempts");
                 return;
             }
-            int delay = reconnectDelaySeconds();
+            // Read WHY we were disconnected and pick a policy. A ban / staff kick /
+            // duplicate-login STOPs (don't come straight back); a full/restarting/
+            // auth-down server BACKOFFs (wait longer); everything else RECONNECTs.
+            String reason = readReason(mc);
+            DisconnectClassifier.Verdict v = DisconnectClassifier.classify(reason);
+            if (v.action() == DisconnectClassifier.Action.STOP) {
+                gaveUp = true;
+                log("not reconnecting — " + v.label() + ": \"" + shorten(reason) + "\"");
+                return;
+            }
+            boolean backoff = v.action() == DisconnectClassifier.Action.BACKOFF;
+            int delay = backoff
+                    ? Math.max(reconnectDelaySeconds(), Math.max(1, config.reconnectMaxDelaySeconds))
+                    : reconnectDelaySeconds();
             countdown = delay * 20;
-            log("connection lost — reconnecting in " + delay + "s (attempt " + (attempts + 1) + ")");
+            String why = backoff ? "server not ready (" + v.label() + ")" : "connection lost";
+            log(why + " — reconnecting in " + delay + "s (attempt " + (attempts + 1) + ")");
         }
         if (countdown > 0) { countdown--; return; }
 
@@ -115,6 +141,25 @@ public class AutoReconnect {
             log("reconnect failed to start: " + t.getMessage());
             reconnecting = false;   // let the DisconnectedScreen re-trigger a retry
         }
+    }
+
+    /** The disconnect reason shown on the screen, rendered to a plain string (or ""). */
+    private static String readReason(MinecraftClient mc) {
+        try {
+            if (mc.currentScreen instanceof DisconnectedScreen ds) {
+                DisconnectionInfo info = ((DisconnectedScreenAccessor) (Object) ds).getInfo();
+                if (info != null && info.reason() != null) return info.reason().getString();
+            }
+        } catch (Throwable ignored) {
+            // Never let reason-reading break the reconnect loop — fall back to "".
+        }
+        return "";
+    }
+
+    /** One-line, length-capped reason for logging. */
+    private static String shorten(String s) {
+        String out = s.replace('\n', ' ').trim();
+        return out.length() > 120 ? out.substring(0, 117) + "…" : out;
     }
 
     /** Manual override (e.g. panic): stop trying to reconnect this outage. */
