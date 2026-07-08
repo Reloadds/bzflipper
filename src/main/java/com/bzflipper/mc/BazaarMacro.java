@@ -956,8 +956,13 @@ public class BazaarMacro {
             String pick = pickNextItem(grid);
             if (pick != null) {
                 if (config.dryRun) {
+                    // Pricing phases never run in dry-run — preview the depth
+                    // decision here so the new behavior is watchable before live.
+                    String pricing = depthCrowded(pick, true)
+                            ? " §7(would price into spread — crowded book)§r" : "";
                     statusLine = "DRY: would buy " + pick;
-                    note("§eDRY RUN§r — would buy §f" + pick + "§r (set dryRun:false to trade)");
+                    note("§eDRY RUN§r — would buy §f" + pick + "§r" + pricing
+                            + " (set dryRun:false to trade)");
                     return;
                 }
                 activeItem = pick;
@@ -1615,9 +1620,32 @@ public class BazaarMacro {
 
     // ---- sell ----
 
-    private boolean priceAggressively() {
-        return activeItem != null && relistCounts.getOrDefault(
-                key(activeItem), 0) >= config.aggressiveAfterRelists;
+    /** True when the current best price level is so crowded that joining the
+     *  +0.1 game means re-undercut wars: the depth queued at top-of-book would
+     *  take > depthWaitMinutes to clear at this leg's market flow. Margin guard:
+     *  only give up the spread slice when the flip still clears 1.5× the minimum
+     *  margin afterwards — never trade the whole edge for queue position. */
+    private boolean depthCrowded(String item, boolean buySide) {
+        if (config.depthWaitMinutes <= 0 || item == null) return false;
+        FlipCandidate q = api.quote(item);
+        if (q == null) return false;
+        double depth = buySide ? q.buyDepth : q.sellDepth;
+        double flow  = buySide ? q.buyLegHourly() : q.sellLegHourly();
+        if (flow <= 0 || depth <= 0) return false;
+        return depth / flow * 60.0 > config.depthWaitMinutes
+                && q.margin(config.taxFraction) > config.apiMinMargin * 1.5;
+    }
+
+    private boolean priceAggressively(boolean buySide) {
+        if (activeItem == null) return false;
+        if (relistCounts.getOrDefault(key(activeItem), 0) >= config.aggressiveAfterRelists) return true;
+        // Depth-aware: pay the spread slice up front on crowded books instead of
+        // losing the same value to relist churn and queue time.
+        if (depthCrowded(activeItem, buySide)) {
+            log("crowded book on " + activeItem + " — pricing into the spread");
+            return true;
+        }
+        return false;
     }
 
     /** Open a sell offer — but bail if we don't actually hold the item (e.g. the
@@ -1646,7 +1674,7 @@ public class BazaarMacro {
     /** Buy price: normally "top order +0.1"; after repeated relist wars, jump the
      *  queue with "5% of spread" so +0.1 ping-pong ends. */
     private void pBuyPrice(MinecraftClient mc) {
-        if (priceAggressively() && GuiHelper.clickByName(mc, BazaarStrings.BTN_SPREAD_BUY)) {
+        if (priceAggressively(true) && GuiHelper.clickByName(mc, BazaarStrings.BTN_SPREAD_BUY)) {
             phase = Phase.BUY_CONFIRM; return;
         }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_PRICE)) { phase = Phase.BUY_CONFIRM; return; }
@@ -1679,7 +1707,7 @@ public class BazaarMacro {
             return;
         }
 
-        if (priceAggressively() && GuiHelper.clickByName(mc, BazaarStrings.BTN_SPREAD_SELL)) {
+        if (priceAggressively(false) && GuiHelper.clickByName(mc, BazaarStrings.BTN_SPREAD_SELL)) {
             phase = Phase.SELL_CONFIRM; return;
         }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_BEST_SELL)) { phase = Phase.SELL_CONFIRM; return; }

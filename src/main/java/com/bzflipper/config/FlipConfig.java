@@ -227,6 +227,15 @@ public class FlipConfig {
      *  "5%/10% of spread" presets to jump the queue and end +0.1 wars. */
     public int aggressiveAfterRelists = 2;
 
+    /** Depth-aware pricing: if the units queued at the current best price level
+     *  would take longer than this to clear (top-of-book depth ÷ market flow),
+     *  take the spread preset IMMEDIATELY instead of playing +0.1 — a crowded
+     *  level means re-undercut wars, and the small spread give-up buys a
+     *  front-of-queue fill. Only fires when the item's margin still clears
+     *  1.5× apiMinMargin after the give-up. 0 = off (presets only after
+     *  aggressiveAfterRelists, as before). */
+    public int depthWaitMinutes = 20;
+
     /** Cancel a buy order that's still 0% filled after this many minutes (dead
      *  capital) and redeploy the coins elsewhere. */
     public int buyStallMinutes = 10;
