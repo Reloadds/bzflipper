@@ -48,7 +48,15 @@ public final class DisconnectClassifier {
         {"code of conduct", "must accept code of conduct"},
         {"does not accept transfers", "transfers disabled"},
         {"profile public key", "key/clock problem"},     // expired / invalid signature for profile public key
-        {"kicked by an operator", "staff kick"},         // manual staff action — don't come straight back
+        {"kicked by an operator", "staff kick"},         // vanilla manual staff action — don't come straight back
+        // Hypixel staff/security closes: rejoining right after these is exactly the
+        // bot-like behavior we want to avoid, and they need a human anyway.
+        {"watchdog", "anticheat/watchdog"},              // Hypixel anticheat kick/ban
+        {"security alert", "security hold"},             // Hypixel suspicious-login lock
+        {"suspicious", "security hold"},
+        {"moderator", "staff kick"},                     // "...kicked by a moderator", "a moderator removed you"
+        {"staff member", "staff kick"},
+        {"blacklisted", "blacklisted"},
     };
 
     // BACKOFF — availability / capacity / auth / join hiccup. Retry, but wait longer.

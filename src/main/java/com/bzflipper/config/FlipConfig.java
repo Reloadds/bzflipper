@@ -224,8 +224,10 @@ public class FlipConfig {
      *  capital) and redeploy the coins elsewhere. */
     public int buyStallMinutes = 10;
 
-    /** If true, the macro only navigates + reads prices and never places orders. */
-    public boolean dryRun = true;
+    /** If true, the macro only navigates + reads prices and never places orders.
+     *  volatile: the web dashboard toggles this from its HTTP thread; the game
+     *  tick loop must see the change promptly and safely. */
+    public volatile boolean dryRun = true;
 
     // ---- Auto-reconnect ----
     /** Automatically rejoin the server after ANY involuntary disconnect (kick,
@@ -287,7 +289,9 @@ public class FlipConfig {
         return cfg;
     }
 
-    public void save() {
+    /** synchronized: the dashboard's HTTP thread and the game thread can both save;
+     *  serialize the writes so a concurrent save can't interleave/corrupt the file. */
+    public synchronized void save() {
         try {
             Files.writeString(path(), GSON.toJson(this));
         } catch (IOException e) {

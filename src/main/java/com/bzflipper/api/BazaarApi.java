@@ -27,12 +27,14 @@ import java.util.concurrent.TimeUnit;
  * touches the network on the render/tick thread.
  *
  * Endpoint: https://api.hypixel.net/v2/skyblock/bazaar
- *   products.<TAG>.buy_summary[0].pricePerUnit  = highest buy order  (we outbid)
- *   products.<TAG>.sell_summary[0].pricePerUnit = lowest  sell offer (we undercut)
+ *   products.<TAG>.buy_summary[0].pricePerUnit  = lowest  SELL offer (we undercut)
+ *   products.<TAG>.sell_summary[0].pricePerUnit = highest BUY order  (we outbid)
  *   products.<TAG>.quick_status.{buyMovingWeek, sellMovingWeek} = weekly volume
  *
- * NOTE: Hypixel's field naming is famously inverted; we deliberately use the
- * order-book summaries (unambiguous) rather than quick_status.buyPrice/sellPrice.
+ * NOTE: Hypixel's field naming is famously INVERTED — `buy_summary` holds the
+ * SELL offers and `sell_summary` holds the BUY orders. The code below swaps them
+ * accordingly (see the assignments in refresh()). Do NOT "correct" the swap to
+ * match the field names, or every margin goes negative and no flips are found.
  */
 public class BazaarApi {
 
@@ -112,6 +114,9 @@ public class BazaarApi {
         Map<String, FlipCandidate> quoteMap = new java.util.HashMap<>();
 
         for (Map.Entry<String, com.google.gson.JsonElement> e : products.entrySet()) {
+          // One malformed product (missing quick_status / fields, e.g. during a
+          // fresh item launch) must not abort the whole refresh — skip just it.
+          try {
             JsonObject p = e.getValue().getAsJsonObject();
             // Hypixel's naming is INVERTED: buy_summary holds the SELL offers,
             // sell_summary holds the BUY orders. Use them accordingly.
@@ -124,6 +129,7 @@ public class BazaarApi {
             if (topBuyOrder <= 0 || lowestSellOffer <= 0) continue;
 
             JsonObject q = p.getAsJsonObject("quick_status");
+            if (q == null || !q.has("buyMovingWeek") || !q.has("sellMovingWeek")) continue;
             double buyMW = q.get("buyMovingWeek").getAsDouble();
             double sellMW = q.get("sellMovingWeek").getAsDouble();
 
@@ -171,6 +177,9 @@ public class BazaarApi {
             }
 
             list.add(c);
+          } catch (RuntimeException ex) {
+            // Malformed/partial product JSON — skip this one, keep the rest.
+          }
         }
 
         list.sort((a, b) -> Double.compare(b.score(config), a.score(config)));

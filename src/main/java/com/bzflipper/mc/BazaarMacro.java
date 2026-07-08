@@ -54,9 +54,21 @@ public class BazaarMacro {
     /** Don't prune an order from memory until it's had time to appear in the grid. */
     private static final long PRUNE_AGE_MS = 90_000;
 
+    /** COOKIE_CHECK/COOKIE_USE bypass checkStuck(), so give them their own timeout
+     *  (~10s) — enough for a couple of /sbmenu attempts, short enough that a stuck
+     *  menu can never wedge the whole bot. */
+    private static final int COOKIE_STUCK_LIMIT = 200;
+
+    /** Safety net for the chat/sidebar restart pause: if we latched "server
+     *  closing" but no restart actually happened (no world change) within this
+     *  window and the sidebar no longer shows it, auto-resume instead of freezing. */
+    private static final long SERVER_CLOSING_MAX_MS = 10 * 60_000L;
+
     private int orderLimit;                 // total slots (learned from chat)
     private long dailyLimitUntil = 0;       // pause new orders until this time
     private boolean serverClosing = false;  // Hypixel restart in progress → pause
+    private long serverClosingSince = 0;    // when the restart pause latched (for the timeout above)
+    private int cookiePhaseTicks = 0;       // stuck-timeout counter for the two early-return cookie phases
     private Object lastWorld = null;         // detect world change (rejoin)
     private long lastManageRefresh = 0;      // periodic Manage re-open to catch new fills
     private final Map<String, Long> firstClaimable = new HashMap<>();  // stall-grace timing
@@ -218,7 +230,7 @@ public class BazaarMacro {
                     + config.dailyLimitCooldownMinutes + "m; exiting via instasell");
         } else if (m.contains("about to restart") || m.contains("server is restarting")
                 || m.contains("server closing") || m.contains("restarting in")) {
-            if (!serverClosing) { serverClosing = true; saveState(); note("§eserver restarting — pausing"); }
+            if (!serverClosing) { serverClosing = true; serverClosingSince = System.currentTimeMillis(); saveState(); note("§eserver restarting — pausing"); }
         } else if (m.contains("space required to claim") || m.contains("don't have the space")
                 || m.contains("inventory is full")) {
             if (!inventoryFull) { inventoryFull = true; note("§einventory full — selling to free space before claiming"); }
@@ -405,10 +417,22 @@ public class BazaarMacro {
 
         // Server restart handling: pause on the way out; resume after rejoin.
         if (mc.world != lastWorld) { lastWorld = mc.world; serverClosing = false; }
-        if (serverClosing || serverClosingNow(mc)) {
-            if (!serverClosing) { serverClosing = true; saveState(); log("§eserver restarting — paused until rejoin"); }
-            statusLine = "server restarting — paused";
-            return;
+        boolean sidebarClosing = serverClosingNow(mc);
+        if (serverClosing || sidebarClosing) {
+            if (!serverClosing) {
+                serverClosing = true; serverClosingSince = System.currentTimeMillis();
+                saveState(); log("§eserver restarting — paused until rejoin");
+            }
+            // Safety net: if we latched on a chat/sidebar match but no restart ever
+            // happened (no world change) and the sidebar no longer shows it, resume
+            // after SERVER_CLOSING_MAX_MS instead of freezing until a manual relog.
+            if (!sidebarClosing && System.currentTimeMillis() - serverClosingSince > SERVER_CLOSING_MAX_MS) {
+                serverClosing = false;
+                log("§erestart pause expired with no restart — resuming");
+            } else {
+                statusLine = "server restarting — paused";
+                return;
+            }
         }
 
         if (buyCooldown > 0) buyCooldown--;
@@ -440,9 +464,22 @@ public class BazaarMacro {
         }
 
         // Cookie check needs the SkyBlock Menu (/sbmenu), and consuming needs the
-        // GUI CLOSED — both handled here, outside the open-bazaar flow.
-        if (phase == Phase.COOKIE_CHECK) { pCookieCheck(mc); return; }
-        if (phase == Phase.COOKIE_USE)   { pCookieUse(mc); return; }
+        // GUI CLOSED — both handled here, outside the open-bazaar flow. They skip
+        // checkStuck(), so guard them with their own timeout: a /sbmenu that never
+        // opens (limbo, rate-limit, blocking GUI) must not wedge the whole bot.
+        if (phase == Phase.COOKIE_CHECK || phase == Phase.COOKIE_USE) {
+            if (++cookiePhaseTicks > COOKIE_STUCK_LIMIT) {
+                cookiePhaseTicks = 0;
+                note("§ecookie renewal stuck (" + phase + ") — skipping, will retry later");
+                nextCookieCheck = System.currentTimeMillis() + config.cookieCheckHours * 3_600_000L;
+                if (mc.player != null && GuiHelper.openChest(mc) != null) mc.player.closeHandledScreen();
+                phase = Phase.PLAN;
+                return;
+            }
+            if (phase == Phase.COOKIE_CHECK) pCookieCheck(mc); else pCookieUse(mc);
+            return;
+        }
+        cookiePhaseTicks = 0;
 
         // While a sign popup is pending, the chest may close a moment before the
         // sign opens — do NOT fire /bz into that gap (it cancels the sign).
@@ -716,10 +753,13 @@ public class BazaarMacro {
             boolean beaten = o.buy()
                     ? q.topBuyOrder > o.pricePerUnit() + EPS       // someone bids higher than us
                     : q.lowestSellOffer < o.pricePerUnit() - EPS;  // someone offers lower than us
-            // If the book's best equals our own price (±tick), the "beater" is us.
+            // If the book's best IS our own order it sits at ~our exact price (the
+            // API includes our order), so an EPS tolerance identifies "that's me".
+            // A genuine one-tick undercut/outbid is a full TICK away — must NOT be
+            // swallowed here, or we'd never react to the most common competitive move.
             boolean bookIsUs = o.buy()
-                    ? Math.abs(q.topBuyOrder - o.pricePerUnit()) <= PriceMath.TICK + EPS
-                    : Math.abs(q.lowestSellOffer - o.pricePerUnit()) <= PriceMath.TICK + EPS;
+                    ? Math.abs(q.topBuyOrder - o.pricePerUnit()) <= EPS
+                    : Math.abs(q.lowestSellOffer - o.pricePerUnit()) <= EPS;
             if (!beaten || myTwin || bookIsUs) continue;
             if (config.dryRun) { note("DRY: would relist " + o.item()); continue; }
             // Sell-side: don't chase the price DOWN past our cost. If we can't
@@ -738,7 +778,10 @@ public class BazaarMacro {
             // Sell-side cancel refunds items: skip until the refund fits, and
             // don't double-cancel the same offer while the grid catches up.
             if (!o.buy() && (!refundFits(mc, o) || recentlyCancelled(o.item()))) continue;
-            int relists = relistCounts.merge(o.key(), 1, Integer::sum);
+            // Prospective count for the decision — committed to relistCounts ONLY if
+            // the cancel click actually lands, so a failed click can't inflate the
+            // war counter and prematurely blacklist/instasell a healthy order.
+            int relists = relistCounts.getOrDefault(o.key(), 0) + 1;
             statusLine = "beaten on " + o.item() + " — cancelling (relist #" + relists + ")";
             cancelIsBuy = o.buy();
             // Buy side: give up after too many relist wars (manipulated/contested item).
@@ -749,7 +792,11 @@ public class BazaarMacro {
             cancelSilent = false;
             cancelItem = o.item();
             cancelAmount = o.buy() ? o.amount() : remainingUnits(o);
-            if (GuiHelper.clickSlotIndex(mc, o.slot())) { markCancelled(o.item()); phase = Phase.CANCEL; }
+            if (GuiHelper.clickSlotIndex(mc, o.slot())) {
+                relistCounts.put(o.key(), relists);
+                markCancelled(o.item());
+                phase = Phase.CANCEL;
+            }
             return;
         }
 
@@ -1012,10 +1059,12 @@ public class BazaarMacro {
         int estSold = o.filled() ? total : (int) Math.floor(total * o.filledPct() / 100.0);
         int prevSold = oi != null ? oi.soldSoFar : 0;
         int newSold = Math.max(0, estSold - prevSold);
-        // Fallback ONLY when the fill % was unreadable (estSold==0 despite being
-        // claimable) — never when it's readable and simply shows no NEW units
-        // (e.g. a duplicate claim on stale grid data would book phantom profit).
-        if (newSold == 0 && estSold == 0) newSold = Math.max(1, total - prevSold);
+        // If the fill % is unreadable on a partial claim (estSold==0 while the order
+        // isn't reported full), we can't tell how many units sold — so book NOTHING
+        // this pass rather than assume a full sale. Assuming full would over-count
+        // profit AND abandon the unsold remainder's cost basis. A later Manage
+        // refresh with a readable % books it correctly; if the order actually
+        // completed, prune clears it. Conservative: undercount beats phantom profit.
         if (oi != null) oi.soldSoFar = prevSold + newSold;
 
         sellsFilled++;
@@ -1205,6 +1254,10 @@ public class BazaarMacro {
                 activeHourlyVol = Double.MAX_VALUE;
                 activeBypassInv = false;
                 activeStackSize = 64;
+                // Reset the API-only sizing inputs so a stale volatility/margin from
+                // a prior API pick can't leak into Kelly sizing or quotedMargin here.
+                activeVolatility = 0;
+                activeMargin = 0;
                 return t.product;
             }
         }

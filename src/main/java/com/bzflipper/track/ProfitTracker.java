@@ -42,7 +42,7 @@ public class ProfitTracker {
 
     /** Session coins per hour including {@code extra} unrealized profit (e.g. the
      *  projected value of open sell offers), for an "if everything sells" rate. */
-    public double sessionPerHour(double extra) {
+    public synchronized double sessionPerHour(double extra) {
         return (total + extra) / (elapsedSeconds() / 3600.0);
     }
 
