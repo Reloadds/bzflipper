@@ -203,17 +203,40 @@ public class FlipConfig {
      *  margin — temporarily blacklisted, then given a fresh chance. */
     public int badItemBlacklistMinutes = 45;
 
-    // ---- Booster Cookie automation ----
-    /** Keep the Booster Cookie buff alive automatically (it cuts bazaar tax). */
-    public boolean autoCookie = true;
+    // ---- Booster Cookie refresh guard ----
+    // The Bazaar is only reachable via /bz while the Cookie Buff is active, and
+    // the buff counts down even while offline — so the macro reads the remaining
+    // time at the top of each flip cycle and refreshes before it lapses.
 
-    /** Renew when remaining buff time drops to this many days. */
-    public double cookieRenewDays = 1.0;
+    /** Master switch for the cookie refresh guard. (Was `autoCookie`; that name is
+     *  still parsed below for back-compat.) */
+    public boolean cookieRefreshEnabled = true;
 
-    /** Safety cap: never instabuy a cookie above this price (0 = no cap). */
+    /** Refresh once remaining buff time drops to this many HOURS (default 24h). */
+    public double cookieRefreshThresholdHours = 24;
+
+    /** If true AND no cookie is held, INSTANT-BUY one from the Bazaar before
+     *  consuming. Default false: consume-from-inventory only, else hard-stop —
+     *  Booster Cookies cost ~13-14M, so buying is opt-in. */
+    public boolean buyCookieWhenLow = false;
+
+    /** Two-stage consume retry cap before HARD STOP (never buy-and-consume in an
+     *  unbounded loop — a cookie is real money). */
+    public int cookieConsumeMaxRetries = 2;
+
+    /** @deprecated superseded by {@link #cookieRefreshEnabled}; still read on load. */
+    @Deprecated public Boolean autoCookie = null;
+
+    /** @deprecated superseded by {@link #cookieRefreshThresholdHours} (hours);
+     *  still read on load (days → hours). */
+    @Deprecated public Double cookieRenewDays = null;
+
+    /** Safety cap: never instabuy a cookie above this price (0 = no cap). Also the
+     *  reserve figure used for the escrow-aware affordability check. */
     public double cookieMaxPrice = 25_000_000;
 
-    /** Hours between cookie-buff checks. */
+    /** Hours between cookie-buff re-checks via the SkyBlock Menu when the cheap
+     *  tab-list read is unavailable/uncertain. */
     public int cookieCheckHours = 6;
 
     // ---- Web dashboard (localhost) ----
@@ -306,6 +329,7 @@ public class FlipConfig {
                     // Migrate the legacy 30-tick new-order cooldown (never chosen
                     // deliberately — it just slowed the book from filling) to off.
                     if (cfg.orderCooldownTicks == 30) { cfg.orderCooldownTicks = 0; cfg.save(); }
+                    cfg.migrateCookieFields();
                     return cfg;
                 }
             }
@@ -315,6 +339,15 @@ public class FlipConfig {
         FlipConfig cfg = new FlipConfig();
         cfg.save();
         return cfg;
+    }
+
+    /** Carry old cookie config (autoCookie / cookieRenewDays) forward onto the new
+     *  fields so existing configs keep working, then clear the legacy keys. */
+    private void migrateCookieFields() {
+        boolean changed = false;
+        if (autoCookie != null)     { cookieRefreshEnabled = autoCookie; autoCookie = null; changed = true; }
+        if (cookieRenewDays != null) { cookieRefreshThresholdHours = cookieRenewDays * 24.0; cookieRenewDays = null; changed = true; }
+        if (changed) save();
     }
 
     /** synchronized: the dashboard's HTTP thread and the game thread can both save;

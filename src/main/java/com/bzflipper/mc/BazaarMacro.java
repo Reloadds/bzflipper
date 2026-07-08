@@ -45,7 +45,8 @@ public class BazaarMacro {
         BUY_OPEN, BUY_AMOUNT, BUY_PRICE, BUY_CONFIRM,
         SELL_OPEN, SELL_AMOUNT, SELL_PRICE, SELL_CONFIRM,
         SELL_INSTANT, CANCEL, PICKUP_STASH,
-        COOKIE_CHECK, COOKIE_INSTABUY, COOKIE_AMOUNT, COOKIE_MOVE, COOKIE_USE, COOKIE_CONFIRM
+        COOKIE_CHECK, COOKIE_INSTABUY, COOKIE_AMOUNT, COOKIE_MOVE, COOKIE_USE,
+        COOKIE_CONFIRM, COOKIE_VERIFY
     }
 
     private static final int STUCK_LIMIT = 40;
@@ -77,10 +78,28 @@ public class BazaarMacro {
     private boolean inventoryFull = false;   // server said "no space" → sell before claiming
     private boolean stashPending = false;    // materials went to the stash → recover them
 
-    // Booster Cookie automation.
+    // Booster Cookie refresh guard.
     private long nextCookieCheck = 0;
     private int cookieCmdCooldown = 0;
     public volatile String cookieStatus = "?";
+    /** Live remaining buff time (ms) from the tab-list footer: >0 active, 0 expired,
+     *  -1 unknown/unreadable. -1 is NEVER treated as safe (#4). */
+    private volatile long cookieRemainMs = -1;
+    /** True while a refresh cycle is in progress (drives HUD, panic teardown, and
+     *  the top-of-cycle gate so we don't re-trigger while already refreshing). */
+    private volatile boolean cookieRefreshActive = false;
+    /** Two-stage consume tracking (#3): 0 idle, 1 = used cookie / awaiting confirm
+     *  GUI, 2 = confirm clicked / awaiting timer re-read. */
+    private volatile int cookieStage = 0;
+    private int cookieRetries = 0;
+    private long cookieBeforeMs = -1;          // timer read just before the consume (#3 verify)
+    private int cookiePrevSelected = -1;       // hotbar slot to restore after consume (#12)
+    private int cookieHotbarSlot = -1;         // where we placed the cookie (0–8)
+    private boolean cookieSlotSelected = false; // paced two-step: select, wait, THEN use (#12)
+    private int cookieVerifyTicks = 0;         // grace for the footer to catch up after consume
+    private long lastFooterOkAt = 0;           // last definite footer read (for the #4 unknown fallback)
+    /** Non-null = hard-stopped on a cookie failure; shown on the HUD. */
+    public volatile String cookieError = null;
 
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
@@ -263,10 +282,10 @@ public class BazaarMacro {
             // The click that triggered this was a FAILED claim — undo its bookkeeping.
             rollbackRefusedClaim();
         } else if (m.contains("consumed") && m.contains("booster cookie")) {
-            note("§acookie consumed — buff renewed!");
-            cookieStatus = "~4d";
-            nextCookieCheck = System.currentTimeMillis() + 10 * 60_000L;   // verify soon
-            if (phase == Phase.COOKIE_CONFIRM || phase == Phase.COOKIE_USE) phase = Phase.PLAN;
+            // Chat confirms the consume took — but we STILL re-read the footer timer
+            // in COOKIE_VERIFY as the authoritative check (chat can be missed/spoofed).
+            note("§acookie consumed — verifying buff…");
+            if (phase == Phase.COOKIE_CONFIRM) phase = Phase.COOKIE_VERIFY;
         } else if (m.contains("stashed away")) {
             // A claim overflowed into the stash — stop claiming, sell, then recover.
             inventoryFull = true;
@@ -392,6 +411,9 @@ public class BazaarMacro {
         inventoryFull = false;
         stashPending = false;
         nextCookieCheck = System.currentTimeMillis() + 30_000L;   // check shortly after start
+        // Clear any prior cookie refresh/hard-stop so a manual restart re-arms the guard.
+        cookieError = null; cookieRefreshActive = false; cookieStage = 0;
+        cookieRetries = 0; cookieSlotSelected = false; cookieHotbarSlot = -1; cookiePrevSelected = -1;
         lastManageRefresh = System.currentTimeMillis();   // grid is fresh at start — no bounce
         resetDelay();
 
@@ -415,6 +437,10 @@ public class BazaarMacro {
     public void stop(String why) {
         enabled = false;
         phase = Phase.IDLE;
+        // #8: if a refresh was mid-flight (incl. the End panic key firing while the
+        // confirm popup is open), close any GUI and restore the selected slot so the
+        // client is left safe — no held item, no half-open GUI, no dangling popup.
+        cookieTeardown(MinecraftClient.getInstance());
         statusLine = "stopped: " + why;
         log("stopped: " + why);
         saveState();
@@ -495,6 +521,10 @@ public class BazaarMacro {
 
         purse = PurseReader.readPurse(mc);
         updateTopCandidate();
+        // Cheap, GUI-free buff-timer read every tick — the "top of each flip cycle"
+        // read the refresh guard is built on. Runs on the client thread; never
+        // couples to the background API fetch thread (#7).
+        updateCookieTimer(mc);
 
         // Sign popups (Custom Amount / Custom Price / search) aren't chest GUIs.
         if (SignFiller.isSignScreen(mc)) {
@@ -523,16 +553,22 @@ public class BazaarMacro {
         // GUI CLOSED — both handled here, outside the open-bazaar flow. They skip
         // checkStuck(), so guard them with their own timeout: a /sbmenu that never
         // opens (limbo, rate-limit, blocking GUI) must not wedge the whole bot.
-        if (phase == Phase.COOKIE_CHECK || phase == Phase.COOKIE_USE) {
+        // COOKIE_CHECK (sends /sbmenu), COOKIE_USE (stage 1: use item — needs the GUI
+        // CLOSED), and COOKIE_VERIFY (re-read timer — no GUI) all run here, before
+        // the open-bazaar gate. A stuck stage counts toward the retry cap (#3) so a
+        // wedged /sbmenu or a confirm GUI that never opens can never money-bonfire.
+        if (phase == Phase.COOKIE_CHECK || phase == Phase.COOKIE_USE || phase == Phase.COOKIE_VERIFY) {
             if (++cookiePhaseTicks > COOKIE_STUCK_LIMIT) {
                 cookiePhaseTicks = 0;
-                note("§ecookie renewal stuck (" + phase + ") — skipping, will retry later");
-                nextCookieCheck = System.currentTimeMillis() + config.cookieCheckHours * 3_600_000L;
-                if (mc.player != null && GuiHelper.openChest(mc) != null) mc.player.closeHandledScreen();
-                phase = Phase.PLAN;
+                cookieStageTimedOut(mc, "stage wedged in " + phase);
                 return;
             }
-            if (phase == Phase.COOKIE_CHECK) pCookieCheck(mc); else pCookieUse(mc);
+            switch (phase) {
+                case COOKIE_CHECK  -> pCookieCheck(mc);
+                case COOKIE_USE    -> pCookieUse(mc);
+                case COOKIE_VERIFY -> pCookieVerify(mc);
+                default -> {}
+            }
             return;
         }
         cookiePhaseTicks = 0;
@@ -578,8 +614,8 @@ public class BazaarMacro {
             case COOKIE_INSTABUY -> pCookieInstabuy(mc);
             case COOKIE_AMOUNT   -> pCookieAmount(mc);
             case COOKIE_MOVE     -> pCookieMove(mc);
-            case COOKIE_CONFIRM  -> { if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CONSUME)) { nextCookieCheck = System.currentTimeMillis() + 10 * 60_000L; phase = Phase.PLAN; } }
-            case COOKIE_CHECK, COOKIE_USE -> { /* handled before the openChest check */ }
+            case COOKIE_CONFIRM  -> pCookieConfirm(mc);   // stage 2 (verifies GUI first)
+            case COOKIE_CHECK, COOKIE_USE, COOKIE_VERIFY -> { /* handled before the openChest check */ }
             case IDLE         -> { }
         }
         saveStateIfDue();
@@ -610,12 +646,8 @@ public class BazaarMacro {
         boolean slotFree = grid.size() < orderLimit;                       // 14/21/28
         boolean dailyOk = System.currentTimeMillis() >= dailyLimitUntil;   // daily coin limit
 
-        // 0) Booster Cookie upkeep (rare — every cookieCheckHours).
-        if (config.autoCookie && !config.dryRun
-                && System.currentTimeMillis() >= nextCookieCheck) {
-            phase = Phase.COOKIE_CHECK;
-            return;
-        }
+        // 0) Booster Cookie refresh guard — top of each flip cycle.
+        if (maybeStartCookieRefresh(mc)) return;
 
         // 1) Claim goods/coins the moment they're claimable — Hypixel marks an
         //    order "Click to claim!" as soon as ANY of it fills, so this claims
@@ -1793,83 +1825,264 @@ public class BazaarMacro {
         }
     }
 
-    // ---- Booster Cookie automation ----
-    // The buff halves bazaar tax (1.25% → 1.1%) and lasts 4 days per cookie; we
-    // renew when remaining time drops under cookieRenewDays. Remaining time is
-    // read from the cookie item's lore in the SkyBlock Menu (/sbmenu).
+    // ---- Booster Cookie refresh guard ----
+    // The Bazaar is only reachable via /bz while the Cookie Buff is active, and the
+    // buff counts down even while offline. The macro reads the remaining time every
+    // cycle (cheap tab-list footer) and refreshes before it lapses. All Minecraft
+    // interaction routes through the GuiHelper seam so the headless port can reuse
+    // this logic. Each numbered comment below maps to a required failure-mode guard.
 
+    private static final java.util.regex.Pattern DURATION_TOKEN =
+            java.util.regex.Pattern.compile("(\\d+)\\s*([dhms])");
+
+    /** Pure token sum: "1d 3h 22m" → ms. Minecraft-free so the headless port reuses it. */
+    private static long parseDurationTokens(String s) {
+        long ms = 0;
+        java.util.regex.Matcher m = DURATION_TOKEN.matcher(s);
+        while (m.find()) {
+            long v = Long.parseLong(m.group(1));
+            switch (m.group(2)) {
+                case "d" -> ms += v * 86_400_000L;
+                case "h" -> ms += v * 3_600_000L;
+                case "m" -> ms += v * 60_000L;
+                case "s" -> ms += v * 1_000L;
+            }
+        }
+        return ms;
+    }
+
+    /** Remaining buff from the tab-list footer: >0 active, 0 expired, -1 unknown (#10). */
+    private long readFooterRemain(MinecraftClient mc) {
+        String footer = GuiHelper.tablistFooter(mc);
+        if (footer.isEmpty() || !footer.contains(BazaarStrings.FOOTER_COOKIE)) return -1;
+        for (String line : footer.split("\n")) {
+            if (!line.contains(BazaarStrings.FOOTER_COOKIE)) continue;
+            if (line.contains(BazaarStrings.COOKIE_EXPIRED)) return 0;
+            long ms = parseDurationTokens(line);
+            // Cookie line present but no parseable time and not "not active" → treat
+            // as UNKNOWN, never as expired (#4: a blank read is not "safe").
+            return ms > 0 ? ms : -1;
+        }
+        return -1;
+    }
+
+    /** Cheap GUI-free footer read run every tick. Keeps the last definite value on a
+     *  transient blank, but forces UNKNOWN after a sustained blank so the guard can't
+     *  coast on stale data (#4). */
+    private void updateCookieTimer(MinecraftClient mc) {
+        long r = readFooterRemain(mc);
+        long now = System.currentTimeMillis();
+        if (r >= 0) {
+            cookieRemainMs = r;
+            cookieStatus = r == 0 ? "§cEXPIRED" : fmtDuration(r);
+            lastFooterOkAt = now;
+        } else if (lastFooterOkAt != 0 && now - lastFooterOkAt > 120_000) {
+            cookieRemainMs = -1;             // unreadable too long → don't trust the snapshot
+            cookieStatus = "?";
+        }
+    }
+
+    /** Top-of-cycle gate (#task). Returns true if it took over the tick. dryRun only
+     *  reads + warns (#9). Distinguishes expired / low / unknown (#4). */
+    private boolean maybeStartCookieRefresh(MinecraftClient mc) {
+        if (!config.cookieRefreshEnabled || cookieRefreshActive || cookieError != null) return false;
+        long remain = cookieRemainMs;
+        long thr = (long) (config.cookieRefreshThresholdHours * 3_600_000L);
+
+        if (remain < 0) {
+            // #4: unknown is NOT safe. Resolve it authoritatively via /sbmenu on the
+            // slow cadence rather than acting blind.
+            if (System.currentTimeMillis() >= nextCookieCheck) { beginCookieRefresh(mc); return true; }
+            return false;
+        }
+        if (remain == 0) {
+            // #4: EXPIRED → /bz is unavailable. We can only recover by consuming a
+            // cookie we already hold (consuming needs no Bazaar); buying can't work.
+            if (config.dryRun) { statusLine = "DRY: cookie EXPIRED — would consume a held cookie"; return false; }
+            if (GuiHelper.playerHasItem(mc, BazaarStrings.ITEM_COOKIE)) { beginCookieRefresh(mc); return true; }
+            cookieHardStop("buff EXPIRED and no cookie held — Bazaar unreachable, cannot self-recover");
+            return true;
+        }
+        if (remain <= thr) {
+            if (config.dryRun) { statusLine = "DRY: cookie low (" + cookieStatus + ") — would refresh"; return false; }
+            beginCookieRefresh(mc);
+            return true;
+        }
+        return false;
+    }
+
+    /** Enter a refresh cycle: snapshot restore state, then drive COOKIE_CHECK.
+     *  #1: order-monitoring state lives in the orders/pendingSells maps and is
+     *  re-derived from the live grid on return to PLAN — closing/reopening GUIs for
+     *  the refresh never drops it, so there is nothing heavier to snapshot. */
+    private void beginCookieRefresh(MinecraftClient mc) {
+        cookieRefreshActive = true;
+        cookieStage = 0;
+        cookieRetries = 0;
+        cookieVerifyTicks = 0;
+        cookieSlotSelected = false;
+        cookieHotbarSlot = -1;
+        cookieBeforeMs = cookieRemainMs;
+        cookiePrevSelected = GuiHelper.selectedHotbarSlot(mc);   // restored afterward (#12)
+        cookiePhaseTicks = 0;
+        statusLine = "cookie: refreshing…";
+        phase = Phase.COOKIE_CHECK;
+    }
+
+    /** Leave the refresh cycle cleanly and hand back to normal flipping (#1). */
+    private void finishCookieRefresh(MinecraftClient mc, boolean success) {
+        if (cookiePrevSelected >= 0) GuiHelper.setSelectedHotbarSlot(mc, cookiePrevSelected);   // #12
+        cookieRefreshActive = false;
+        cookieStage = 0;
+        cookieSlotSelected = false;
+        cookieHotbarSlot = -1;
+        cookiePrevSelected = -1;
+        cookieVerifyTicks = 0;
+        // Slow cadence on success; short retry window if we bailed (e.g. couldn't afford).
+        nextCookieCheck = System.currentTimeMillis()
+                + (success ? config.cookieCheckHours * 3_600_000L : 10 * 60_000L);
+        phase = Phase.PLAN;
+    }
+
+    /** HARD STOP on an unrecoverable cookie failure — surfaces on the HUD (#3/#4). */
+    private void cookieHardStop(String reason) {
+        cookieError = reason;
+        note("§c§lCOOKIE REFRESH FAILED§r — " + reason);
+        cookieTeardown(MinecraftClient.getInstance());   // #8
+        stop("cookie: " + reason);
+    }
+
+    /** Bounded retry (#3): count an attempt; past the cap, HARD STOP — never an
+     *  unbounded buy-and-consume loop (a cookie is ~13-14M coins). */
+    private void retryOrAbortConsume(MinecraftClient mc, String reason) {
+        cookiePhaseTicks = 0;
+        cookieVerifyTicks = 0;
+        cookieSlotSelected = false;
+        if (mc != null && GuiHelper.openChest(mc) != null && mc.player != null) mc.player.closeHandledScreen();
+        if (++cookieRetries > config.cookieConsumeMaxRetries) {
+            // Stage in the message distinguishes "confirm popup never opened" (stage
+            // 1) from "confirm click didn't register / buff didn't rise" (stage 2).
+            cookieHardStop("consume failed after " + config.cookieConsumeMaxRetries
+                    + " retries at stage " + cookieStage + " (" + reason + ")");
+            return;
+        }
+        note("§econsume retry " + cookieRetries + "/" + config.cookieConsumeMaxRetries
+                + " — stage " + cookieStage + " (" + reason + ")");
+        cookieStage = 0;
+        phase = Phase.COOKIE_CHECK;   // re-derive from scratch (re-read, re-locate cookie)
+    }
+
+    /** Coarse per-stage watchdog fired from the early-return block. */
+    private void cookieStageTimedOut(MinecraftClient mc, String reason) {
+        retryOrAbortConsume(mc, reason);
+    }
+
+    /** Close any GUI, restore the selected slot, leave no cursor item (#8). The
+     *  cookie move uses SWAP (never PICKUP), so nothing is ever left on the cursor;
+     *  a displaced item stays safely in inventory. */
+    private void cookieTeardown(MinecraftClient mc) {
+        if (mc == null || mc.player == null) return;
+        if (mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.HandledScreen) {
+            mc.player.closeHandledScreen();
+        }
+        if (cookiePrevSelected >= 0) { GuiHelper.setSelectedHotbarSlot(mc, cookiePrevSelected); cookiePrevSelected = -1; }
+        cookieRefreshActive = false;
+        cookieStage = 0;
+        cookieSlotSelected = false;
+    }
+
+    static boolean isCookiePhase(Phase p) {
+        return p == Phase.COOKIE_CHECK || p == Phase.COOKIE_INSTABUY || p == Phase.COOKIE_AMOUNT
+                || p == Phase.COOKIE_MOVE || p == Phase.COOKIE_USE || p == Phase.COOKIE_CONFIRM
+                || p == Phase.COOKIE_VERIFY;
+    }
+
+    /** Authoritative timer read from the cookie item's lore in /sbmenu; 0 = "not
+     *  active", -1 = unknown. Also opens /sbmenu (paced, not a fixed sleep — #7). */
     private void pCookieCheck(MinecraftClient mc) {
-        statusLine = "checking cookie buff…";
+        statusLine = "cookie: reading buff…";
         var chest = GuiHelper.openChest(mc);
-        String title = GuiHelper.screenTitle(mc);
-        if (chest != null && title.contains(BazaarStrings.TITLE_SBMENU)) {
+        if (chest != null && GuiHelper.screenTitle(mc).contains(BazaarStrings.TITLE_SBMENU)) {
             long remainMs = parseCookieRemaining(mc);
-            cookieStatus = remainMs < 0 ? "?" : fmtDuration(remainMs);
-            boolean needRenew = remainMs >= 0 && remainMs <= (long) (config.cookieRenewDays * 86_400_000L);
-            log("cookie buff: " + cookieStatus + (needRenew ? " — renewing" : ""));
-            if (!needRenew) {
-                nextCookieCheck = System.currentTimeMillis() + config.cookieCheckHours * 3_600_000L;
+            if (remainMs > 0) { cookieRemainMs = remainMs; cookieStatus = fmtDuration(remainMs); }
+            cookieBeforeMs = remainMs;   // baseline for the post-consume verify (#3)
+            long thr = (long) (config.cookieRefreshThresholdHours * 3_600_000L);
+            // -1 unknown is NOT treated as safe (#4): if we got here we already
+            // believed it low, so proceed to consume rather than cancel on a blank.
+            boolean stillLow = remainMs < 0 || remainMs <= thr;
+            if (!stillLow) {   // recovered since the footer trigger — done
                 if (mc.player != null) mc.player.closeHandledScreen();
-                phase = Phase.PLAN;
+                finishCookieRefresh(mc, true);
                 return;
             }
-            // Renew: already holding a cookie? consume it; else instabuy one first.
             if (GuiHelper.findPlayerSlotByName(mc, BazaarStrings.ITEM_COOKIE) >= 0) {
-                phase = Phase.COOKIE_MOVE;
-            } else {
+                phase = Phase.COOKIE_MOVE;                       // consume a held cookie
+            } else if (config.buyCookieWhenLow && remainMs != 0) {
+                // #6: instant-buy one first (only when allowed and the Bazaar is still
+                // reachable — a 0/expired buff means /bz is down, handled below).
                 if (mc.player != null) mc.player.closeHandledScreen();
                 startNav("Booster Cookie", Phase.COOKIE_INSTABUY);
+            } else if (remainMs == 0) {
+                if (mc.player != null) mc.player.closeHandledScreen();
+                cookieHardStop("buff EXPIRED and none held — cannot buy (Bazaar needs an active buff)");
+            } else {
+                if (mc.player != null) mc.player.closeHandledScreen();
+                cookieHardStop("buff low and no cookie held (buyCookieWhenLow=false) — refusing to churn");
             }
             return;
         }
         if (chest != null) { if (mc.player != null) mc.player.closeHandledScreen(); return; }
+        // Not in /sbmenu yet — open it, paced by a cooldown (wait-for-condition, #7).
         if (cookieCmdCooldown > 0) { cookieCmdCooldown--; return; }
         var nh = mc.getNetworkHandler();
         if (nh != null) nh.sendChatCommand("sbmenu");
         cookieCmdCooldown = 6;
     }
 
-    /** Parse "duration: 3d 22h 17m" from the cookie lore; 0 if "not active"; -1 unknown. */
+    /** Parse the cookie lore duration in /sbmenu; 0 if "not active"; -1 unknown. */
     private long parseCookieRemaining(MinecraftClient mc) {
         int idx = GuiHelper.findSlotByName(mc, BazaarStrings.ITEM_COOKIE);
-        if (idx < 0) return -1;
         var chest = GuiHelper.openChest(mc);
-        if (chest == null) return -1;
+        if (idx < 0 || chest == null) return -1;
         for (String line : GuiHelper.lore(chest.getSlot(idx).getStack())) {
             if (line.contains(BazaarStrings.LORE_NOT_ACTIVE)) return 0;
             if (!line.contains(BazaarStrings.LORE_DURATION)) continue;
-            long ms = 0;
-            java.util.regex.Matcher m = java.util.regex.Pattern
-                    .compile("(\\d+)\\s*([dhms])").matcher(line);
-            while (m.find()) {
-                long v = Long.parseLong(m.group(1));
-                switch (m.group(2)) {
-                    case "d" -> ms += v * 86_400_000L;
-                    case "h" -> ms += v * 3_600_000L;
-                    case "m" -> ms += v * 60_000L;
-                    case "s" -> ms += v * 1_000L;
-                }
-            }
-            return ms;
+            return parseDurationTokens(line);
         }
         return -1;
     }
 
+    /** Instant-buy ONE cookie (#6), with an escrow-aware affordability check (#5). */
     private void pCookieInstabuy(MinecraftClient mc) {
-        statusLine = "buying booster cookie";
+        statusLine = "cookie: buying (instant)…";
         double price = GuiHelper.readCoinPrice(mc, BazaarStrings.BTN_INSTABUY, "per unit");
-        if (config.cookieMaxPrice > 0 && !Double.isNaN(price) && price > config.cookieMaxPrice) {
-            log(String.format(Locale.ROOT, "§ecookie too expensive (%,.0f > %,.0f) — retrying later",
-                    price, config.cookieMaxPrice));
-            nextCookieCheck = System.currentTimeMillis() + 3_600_000L;
-            phase = Phase.PLAN;
-            return;
+        // #5: `purse` already reads NET of coins escrowed by open buy orders, so the
+        // live figure is the truth. The cookie takes PRIORITY over coinReserve —
+        // without it every open order is stranded — so we only refuse when the LIVE
+        // price genuinely can't be paid (or exceeds the price cap), and then PAUSE
+        // cleanly (retry soon) instead of churning. The purchase is a market buy and
+        // is NEVER booked into the coins/hr tracker, so it can't count as a flip loss.
+        if (!Double.isNaN(price)) {
+            if (config.cookieMaxPrice > 0 && price > config.cookieMaxPrice) {
+                note(String.format(Locale.ROOT, "§ecookie %,.0f over cap %,.0f — pausing refresh, retry soon",
+                        price, config.cookieMaxPrice));
+                if (mc.player != null) mc.player.closeHandledScreen();
+                finishCookieRefresh(mc, false);
+                return;
+            }
+            if (!Double.isNaN(purse) && purse < price) {
+                note(String.format(Locale.ROOT, "§ecan't afford cookie (%,.0f > purse %,.0f) — pausing; open orders keep working",
+                        price, purse));
+                if (mc.player != null) mc.player.closeHandledScreen();
+                finishCookieRefresh(mc, false);
+                return;
+            }
         }
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_INSTABUY)) phase = Phase.COOKIE_AMOUNT;
     }
 
     private void pCookieAmount(MinecraftClient mc) {
-        statusLine = "cookie amount: 1";
+        statusLine = "cookie: amount 1…";
         if (GuiHelper.findPlayerSlotByName(mc, BazaarStrings.ITEM_COOKIE) >= 0) {
             phase = Phase.COOKIE_MOVE;   // purchase landed in inventory
             return;
@@ -1878,26 +2091,80 @@ public class BazaarMacro {
         if (GuiHelper.clickByName(mc, BazaarStrings.BTN_CUSTOM_AMOUNT)) requestSign("1", Phase.COOKIE_AMOUNT);
     }
 
+    /** Move the cookie into the hotbar, preferring an EMPTY slot so no gear is
+     *  displaced (#12). This SWAP happens inside the still-open /sbmenu chest, which
+     *  exposes the player inventory — no separate survival-inventory open needed. */
     private void pCookieMove(MinecraftClient mc) {
-        statusLine = "moving cookie to hotbar";
+        statusLine = "cookie: to hotbar…";
+        // Already in the hotbar? use it in place (nothing to move/restore).
+        int already = GuiHelper.hotbarSlotOf(mc, BazaarStrings.ITEM_COOKIE);
+        if (already >= 0) { cookieHotbarSlot = already; phase = Phase.COOKIE_USE; return; }
         int idx = GuiHelper.findPlayerSlotByName(mc, BazaarStrings.ITEM_COOKIE);
-        if (idx < 0) { phase = Phase.PLAN; return; }   // vanished? re-plan
-        if (GuiHelper.swapToHotbar(mc, idx, 8)) phase = Phase.COOKIE_USE;
+        if (idx < 0) { retryOrAbortConsume(mc, "cookie not found to move"); return; }  // never consume nothing (#12)
+        int empty = GuiHelper.firstEmptyHotbarSlot(mc);
+        int target = empty >= 0 ? empty : 8;   // empty preferred; else displace slot 8
+        if (GuiHelper.swapToHotbar(mc, idx, target)) { cookieHotbarSlot = target; phase = Phase.COOKIE_USE; }
     }
 
+    /** Stage 1 (#11): select the cookie slot, brief paced wait, then USE it (a world
+     *  interaction) which opens the confirmation GUI. */
     private void pCookieUse(MinecraftClient mc) {
-        statusLine = "consuming cookie";
-        if (GuiHelper.openChest(mc) != null) {
-            if (mc.player != null) mc.player.closeHandledScreen();
+        cookieStage = 1;
+        // #1: consuming needs the container CLOSED — the use is a world interaction.
+        if (GuiHelper.openChest(mc) != null) { if (mc.player != null) mc.player.closeHandledScreen(); return; }
+        if (cookieHotbarSlot < 0) cookieHotbarSlot = GuiHelper.hotbarSlotOf(mc, BazaarStrings.ITEM_COOKIE);
+        if (cookieHotbarSlot < 0) { retryOrAbortConsume(mc, "cookie left the hotbar"); return; }
+        // #12: switch → (paced tick) → use, so it never looks like an instant robo-flick.
+        if (!cookieSlotSelected) {
+            GuiHelper.setSelectedHotbarSlot(mc, cookieHotbarSlot);
+            cookieSlotSelected = true;
+            statusLine = "cookie: consuming (1/2 selected)…";
             return;
         }
-        if (mc.player == null || mc.interactionManager == null) return;
-        mc.player.getInventory().setSelectedSlot(8);
-        mc.interactionManager.interactItem(mc.player, net.minecraft.util.Hand.MAIN_HAND);
-        phase = Phase.COOKIE_CONFIRM;   // confirm GUI opens; we click "consume"
+        statusLine = "cookie: consuming (1/2 use)…";
+        GuiHelper.useHeldItem(mc);       // #2: sky-aimed item-use, never a block interaction
+        cookieSlotSelected = false;
+        phase = Phase.COOKIE_CONFIRM;    // #7/#11: stage 2 waits for the popup to open
     }
 
-    private static String fmtDuration(long ms) {
+    /** Stage 2 (#11): only after VERIFYING the popup is the cookie-consume
+     *  confirmation, click the CONFIRM slot by name (never a cancel/close). */
+    private void pCookieConfirm(MinecraftClient mc) {
+        cookieStage = 2;
+        statusLine = "cookie: consuming (2/2 confirm)…";
+        // #11: never blind-click — require the confirmation GUI's title first. If it
+        // hasn't opened yet, wait; the coarse checkStuck watchdog forces a retry if
+        // the popup never comes (stage-1 failure).
+        if (!GuiHelper.handledScreenTitleContains(mc, BazaarStrings.TITLE_COOKIE_CONFIRM)) return;
+        if (GuiHelper.clickByName(mc, BazaarStrings.CONFIRM_CONSUME_COOKIE)) {
+            phase = Phase.COOKIE_VERIFY;   // re-read the timer to prove it took (#3/#11)
+        }
+    }
+
+    /** Re-read the buff timer to confirm the consume actually took (#3/#11), giving
+     *  the footer a few paced ticks to update before judging. */
+    private void pCookieVerify(MinecraftClient mc) {
+        statusLine = "cookie: verifying…";
+        // #8: make sure no confirm popup lingers before the world read.
+        if (GuiHelper.openChest(mc) != null) { if (mc.player != null) mc.player.closeHandledScreen(); return; }
+        long remain = readFooterRemain(mc);
+        long thr = (long) (config.cookieRefreshThresholdHours * 3_600_000L);
+        boolean took = remain > thr || (cookieBeforeMs >= 0 && remain > cookieBeforeMs + 60_000L);
+        if (took) {
+            cookieRemainMs = remain;
+            cookieStatus = fmtDuration(remain);
+            note("§acookie refreshed — buff " + cookieStatus);
+            finishCookieRefresh(mc, true);
+            return;
+        }
+        // Not risen yet: let the footer catch up for a few paced ticks; only then
+        // treat a definite no-increase as a failed consume and retry (#3).
+        if (++cookieVerifyTicks < 8) return;
+        if (remain < 0) return;                          // still unreadable — wait for the watchdog
+        retryOrAbortConsume(mc, "buff didn't increase after consume");
+    }
+
+    static String fmtDuration(long ms) {
         long d = ms / 86_400_000L, h = (ms % 86_400_000L) / 3_600_000L;
         return d > 0 ? d + "d" + h + "h" : h + "h" + ((ms % 3_600_000L) / 60_000L) + "m";
     }
@@ -2034,6 +2301,15 @@ public class BazaarMacro {
         boolean waiting = phase == Phase.PLAN || phase == Phase.WAIT_SIGN;
         if (phase == lastPhase && !waiting) {
             if (++stuckTicks > STUCK_LIMIT) {
+                // A stuck COOKIE_* phase (e.g. the confirm popup never opened) must
+                // go through the BOUNDED consume retry, NOT the generic PLAN reset
+                // below — the reset would strand cookieRefreshActive=true and the
+                // guard would never fire again. Stage in the message = #3 diagnosis.
+                if (isCookiePhase(phase)) {
+                    stuckTicks = 0;
+                    retryOrAbortConsume(MinecraftClient.getInstance(), "stuck in " + phase);
+                    return;
+                }
                 log("stuck in " + phase + " — recovering");
                 // A BUY-side navigation dead-end (page never loads, unreachable
                 // item) would re-pick the same item and loop forever — bench it.

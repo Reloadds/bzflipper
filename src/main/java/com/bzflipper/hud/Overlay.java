@@ -39,7 +39,8 @@ public class Overlay {
 
         ProfitTracker t = macro.getTracker();
         List<ParsedOrder> ords = macro.lastOrders;
-        int rows = 7 + (ords.isEmpty() ? 0 : ords.size() + 1);
+        boolean cookieErr = macro.cookieError != null;
+        int rows = 7 + (cookieErr ? 1 : 0) + (ords.isEmpty() ? 0 : ords.size() + 1);
         int x = 6, y = 6;
         int h = rows * LINE + PAD * 2;
 
@@ -81,6 +82,13 @@ public class Overlay {
 
         draw(ctx, mc, macro.statusLine, x + 2, ly, WHITE);
         ly += LINE;
+
+        // Cookie refresh hard-stop (#3/#4) — impossible to miss.
+        if (cookieErr) {
+            String msg = "§c⚠ COOKIE: " + macro.cookieError;
+            draw(ctx, mc, msg.length() > 46 ? msg.substring(0, 46) : msg, x + 2, ly, RED);
+            ly += LINE;
+        }
 
         if (!ords.isEmpty()) {
             draw(ctx, mc, "§8── orders ──", x + 2, ly, GREY);

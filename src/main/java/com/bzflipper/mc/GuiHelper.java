@@ -1,5 +1,6 @@
 package com.bzflipper.mc;
 
+import com.bzflipper.mixin.PlayerListHudAccessor;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.component.DataComponentTypes;
@@ -10,6 +11,7 @@ import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
+import net.minecraft.util.Hand;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -302,6 +304,103 @@ public final class GuiHelper {
         if (chest == null || mc.interactionManager == null || mc.player == null) return false;
         mc.interactionManager.clickSlot(chest.syncId, slotIdx, hotbarIdx, SlotActionType.SWAP, mc.player);
         return true;
+    }
+
+    // ---- Cookie-consume seam (headless port reimplements these) --------------
+    // These four are the ONLY new player-world capabilities the cookie refresh
+    // needs beyond chest clicks. Kept here on the seam so the Mineflayer port has
+    // a single place to reimplement "read tab footer / select hotbar slot / use
+    // held item", instead of raw Minecraft calls leaking into the state machine.
+    //
+    // MAPPING NOTE (Yarn 1.21.11, resolved against the mappings, not memory):
+    //   PlayerInventory.getSelectedSlot() = method_67532, setSelectedSlot(int) =
+    //   method_61496; ClientPlayerInteractionManager.interactItem(player, hand) =
+    //   method_2919; PlayerListHud.footer = field_2154 (via PlayerListHudAccessor).
+
+    /** Plain text of the tab-list FOOTER (lowercased), or "" if unavailable. The
+     *  SkyBlock "Cookie Buff: …" line lives here; readable with no GUI open. */
+    public static String tablistFooter(MinecraftClient mc) {
+        if (mc.inGameHud == null) return "";
+        var hud = mc.inGameHud.getPlayerListHud();
+        if (hud == null) return "";
+        Text footer = ((PlayerListHudAccessor) hud).getFooter();
+        return footer == null ? "" : footer.getString().toLowerCase(Locale.ROOT);
+    }
+
+    /** Currently selected hotbar slot (0–8), or -1 if unavailable. */
+    public static int selectedHotbarSlot(MinecraftClient mc) {
+        return mc.player == null ? -1 : mc.player.getInventory().getSelectedSlot();
+    }
+
+    /** Select a hotbar slot (0–8) as the main hand. No-op if out of range. */
+    public static void setSelectedHotbarSlot(MinecraftClient mc, int slot) {
+        if (mc.player != null && slot >= 0 && slot <= 8) {
+            mc.player.getInventory().setSelectedSlot(slot);
+        }
+    }
+
+    /** Hotbar slot (0–8) holding an item whose name contains {@code needle}, or -1.
+     *  Reads the real player inventory, so it works with or without a GUI open. */
+    public static int hotbarSlotOf(MinecraftClient mc, String needle) {
+        if (mc.player == null) return -1;
+        String n = needle.toLowerCase(Locale.ROOT);
+        for (int i = 0; i <= 8; i++) {
+            if (name(mc.player.getInventory().getStack(i)).contains(n)) return i;
+        }
+        return -1;
+    }
+
+    /** True if the real player inventory (hotbar + main, 0–35) holds an item whose
+     *  name contains {@code needle}. Works with NO GUI open (reads getInventory). */
+    public static boolean playerHasItem(MinecraftClient mc, String needle) {
+        if (mc.player == null) return false;
+        String n = needle.toLowerCase(Locale.ROOT);
+        for (int i = 0; i <= 35; i++) {
+            if (name(mc.player.getInventory().getStack(i)).contains(n)) return true;
+        }
+        return false;
+    }
+
+    /** First EMPTY hotbar slot (0–8), or -1 if the whole hotbar is occupied.
+     *  Used to move a cookie into the hotbar WITHOUT displacing gear. */
+    public static int firstEmptyHotbarSlot(MinecraftClient mc) {
+        if (mc.player == null) return -1;
+        for (int i = 0; i <= 8; i++) {
+            if (mc.player.getInventory().getStack(i).isEmpty()) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Right-click (use) the held item — the world-interaction that opens the
+     * cookie's consume-confirmation GUI.
+     *
+     * GUARD (#2): calling interactItem() directly IS the vanilla "use item in air"
+     * branch (doItemUse routes block hits to interactBlock and only otherwise to
+     * interactItem), so it is NOT interpreted as a block interaction. We ALSO snap
+     * the pitch straight up first so nothing placeable/interactable is under the
+     * crosshair — belt and suspenders — and restore look afterward.
+     *
+     * @return true if the use packet was sent.
+     */
+    public static boolean useHeldItem(MinecraftClient mc) {
+        if (mc.player == null || mc.interactionManager == null) return false;
+        float yaw = mc.player.getYaw(), pitch = mc.player.getPitch();
+        mc.player.setPitch(-90f);   // aim at sky: never target a block
+        try {
+            mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+        } finally {
+            mc.player.setPitch(pitch);   // restore look; macro navigates via GUIs, not aim
+            mc.player.setYaw(yaw);
+        }
+        return true;
+    }
+
+    /** True if a confirmation-style HandledScreen (any non-chest handled screen, or
+     *  a chest) is open whose title contains {@code titleNeedle}. */
+    public static boolean handledScreenTitleContains(MinecraftClient mc, String titleNeedle) {
+        return mc.currentScreen instanceof HandledScreen<?>
+                && screenTitle(mc).contains(titleNeedle.toLowerCase(Locale.ROOT));
     }
 
     /** Count empty slots in the player inventory portion of the open chest GUI. */

@@ -51,6 +51,21 @@ public final class BazaarStrings {
     public static final String LORE_NOT_ACTIVE  = "not active";
     public static final String BTN_CONSUME      = "consume";
 
+    // Primary buff-timer source: the tab-list FOOTER shows "Cookie Buff: 1d 3h"
+    // (or "Not Active" when expired). Read without opening any GUI. LIVE-TUNE: open
+    // your tab list on Hypixel SkyBlock and confirm the exact label wording.
+    public static final String FOOTER_COOKIE    = "cookie buff";
+    // The word that marks the buff as expired in the footer/lore ("Not Active").
+    public static final String COOKIE_EXPIRED   = "not active";
+
+    // Consuming a cookie is a TWO-GUI sequence. Stage 2 opens a confirmation GUI;
+    // verify its TITLE contains this before clicking anything (never blind-click),
+    // then click the CONFIRM slot matched by name (historically a green pane
+    // labelled "Consume"). LIVE-TUNE: both strings — trigger a consume in-game
+    // and read the popup's title and the confirm button's item name.
+    public static final String TITLE_COOKIE_CONFIRM   = "booster cookie";
+    public static final String CONFIRM_CONSUME_COOKIE = "consume";
+
     // On the "Confirm Buy Order" / "Confirm Sell Offer" screen, the submit button
     // is named "Buy Order" / "Sell Offer" with this in its lore ("Click to submit order!").
     public static final String LORE_SUBMIT     = "submit";
