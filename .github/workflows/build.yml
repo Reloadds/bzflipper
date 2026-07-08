@@ -17,6 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the "commit jars to dist/" step can rebase before pushing.
+          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -73,6 +76,35 @@ jobs:
           name: bzflipper-jar
           path: build/libs/*.jar
           if-no-files-found: error
+
+      # Refresh the committed dist/ jars with this build, so the copy in the repo
+      # always matches the latest code. Only on direct pushes to main (not tags/PRs).
+      #
+      # Loop-safe: the push uses GITHUB_TOKEN, and GitHub does NOT trigger new
+      # workflow runs for GITHUB_TOKEN pushes; the "[skip ci]" tag is a second guard.
+      - name: Commit built jars to dist/
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Drop the CI-only version edits so ONLY the dist/ jars get committed.
+          git checkout -- gradle.properties build.gradle || true
+
+          mkdir -p dist
+          rm -f dist/*.jar
+          cp build/libs/*.jar dist/
+          git add -f dist/*.jar
+
+          if git diff --cached --quiet; then
+            echo "dist jars unchanged — nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "ci: refresh dist/ jars from build ${GITHUB_SHA::7} [skip ci]"
+          # Rebase onto any commits pushed while we were building, then push back.
+          git pull --rebase origin main
+          git push origin HEAD:main
 
       # When the push is a version tag (e.g. v0.1.0), publish a GitHub Release
       # with the built jars attached for direct download.
