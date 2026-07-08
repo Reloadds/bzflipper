@@ -140,6 +140,12 @@ public class FlipConfig {
      *  rate before we've measured it live. Once measured, the real rate is used. */
     public double captureFraction = 0.30;
 
+    /** Learn the capture fraction from our own measured fills (EMA of measured
+     *  rate ÷ market flow across all traded items) and use it as the fallback for
+     *  UNMEASURED items once enough samples exist — replaces the static
+     *  captureFraction guess with this account's actual observed share. */
+    public boolean learnCapture = true;
+
     // ---- Opportunity-cost capital recycling (#2) ----
     /** Recycle capital stuck in a non-filling sell offer by exiting it, so the
      *  coins move to higher-velocity flips. Off by default — it CAN realize a

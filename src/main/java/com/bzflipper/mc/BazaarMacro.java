@@ -172,6 +172,12 @@ public class BazaarMacro {
     private final Map<String, Double> buyFillRate = new java.util.concurrent.ConcurrentHashMap<>();
     /** Last fill observation per side+item ("B|key"/"S|key"): [epochMs, filledUnits]. */
     private final Map<String, double[]> fillObs = new HashMap<>();
+    /** Learned capture: EMA of (our measured fill rate ÷ market leg flow) across
+     *  every measurement — this account's real share of an item's volume. Fallback
+     *  for unmeasured items once seeded (better than the static captureFraction
+     *  guess). volatile: exposed on the dashboard off-thread. */
+    private volatile double learnedCapture = 0;
+    private int learnedCaptureN = 0;
     /** Canonical keys of everything we've ever bought — so leftover goods get
      *  sold even if their order was pruned/forgotten. Personal items are never here. */
     private final Set<String> boughtItems = new HashSet<>();
@@ -281,6 +287,8 @@ public class BazaarMacro {
         Map<String, Double> fillRate = new HashMap<>();
         Map<String, Double> buyFillRate = new HashMap<>();
         double allTimeProfit = 0;
+        double learnedCapture = 0;
+        int learnedCaptureN = 0;
         /** [epochMs, coins/hr] market-liquidity samples — regime-detection baseline. */
         java.util.List<double[]> liquiditySamples = new java.util.ArrayList<>();
     }
@@ -313,6 +321,8 @@ public class BazaarMacro {
             if (s.buyFillRate != null) s.buyFillRate.forEach((k, v) -> {
                 if (v != null && v >= 1.0) buyFillRate.put(k, v);
             });
+            learnedCapture = s.learnedCapture;
+            learnedCaptureN = s.learnedCaptureN;
             allTimeProfit = s.allTimeProfit;
             if (s.liquiditySamples != null) liquiditySamples.addAll(s.liquiditySamples);
             System.out.println("[bzflipper] restored state: " + orders.size()
@@ -340,6 +350,8 @@ public class BazaarMacro {
             s.itemProfit.putAll(itemProfit);
             s.fillRate.putAll(fillRate);
             s.buyFillRate.putAll(buyFillRate);
+            s.learnedCapture = learnedCapture;
+            s.learnedCaptureN = learnedCaptureN;
             s.allTimeProfit = allTimeProfit;
             s.liquiditySamples.addAll(liquiditySamples);
             java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
@@ -1282,8 +1294,28 @@ public class BazaarMacro {
             fillObs.put(obsKey, new double[]{now, filled});
             double rate = dFilled / ((now - prev[0]) / 3_600_000.0);   // units per hour
             target.merge(o.key(), rate, (old, r) -> 0.75 * old + 0.25 * r);
+            // Learn OUR real capture: measured rate ÷ this leg's market flow.
+            // Pooled across items/sides into one EMA (clamped against outliers);
+            // becomes the fallback estimate for items we haven't measured yet.
+            if (config.learnCapture) {
+                FlipCandidate q = api.quote(o.key());
+                double legFlow = q == null ? 0 : (o.buy() ? q.buyLegHourly() : q.sellLegHourly());
+                if (legFlow > 0) {
+                    double ratio = Math.max(0.01, Math.min(2.0, rate / legFlow));
+                    learnedCapture = learnedCaptureN == 0 ? ratio
+                            : 0.9 * learnedCapture + 0.1 * ratio;
+                    learnedCaptureN++;
+                }
+            }
             stateDirty = true;
         }
+    }
+
+    /** The capture fraction the estimators should use: the learned account-wide
+     *  share once seeded (≥5 samples), else the configured cold-start guess. */
+    public double captureEstimate() {
+        return (config.learnCapture && learnedCaptureN >= 5)
+                ? learnedCapture : config.captureFraction;
     }
 
     /** THE objective function, in one place: expected realized coins/hour for one
@@ -1299,12 +1331,13 @@ public class BazaarMacro {
     private double[] scoreCandidate(FlipCandidate c) {
         String key = key(c.displayName);
         double ppu = Math.max(0, PriceMath.profitPerUnit(c.topBuyOrder, c.lowestSellOffer, config.taxFraction));
+        double capture = captureEstimate();   // learned account-wide share, or the config guess
         Double sf = fillRate.get(key);
         boolean sellMeasured = sf != null && sf > 0;
-        double sellRate = sellMeasured ? sf : c.sellLegHourly() * config.captureFraction;
+        double sellRate = sellMeasured ? sf : c.sellLegHourly() * capture;
         Double bf = buyFillRate.get(key);
         boolean buyMeasured = bf != null && bf > 0;
-        double buyRate = buyMeasured ? bf : c.buyLegHourly() * config.captureFraction;
+        double buyRate = buyMeasured ? bf : c.buyLegHourly() * capture;
         double velocity = PriceMath.seriesVelocity(buyRate, sellRate);
         double eff = Math.max(0.1, efficiency.getOrDefault(key, 1.0));
         double trendF = Math.max(0.5, Math.min(1.5, 1 + config.trendWeight * c.trend));

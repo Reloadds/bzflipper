@@ -105,6 +105,7 @@ public class WebDashboard {
         m.put("uptimeSec", t.elapsedSeconds());
         m.put("cookie", macro.cookieStatus);
         m.put("apiAge", macro.getApi().ageSeconds());
+        m.put("capture", macro.captureEstimate());   // learned account share (or config guess)
         m.put("flips", macro.flipsCompleted);
         m.put("buysFilled", macro.buysFilled);
         m.put("sellsFilled", macro.sellsFilled);
