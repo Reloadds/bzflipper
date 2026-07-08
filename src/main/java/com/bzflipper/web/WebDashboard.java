@@ -119,9 +119,26 @@ public class WebDashboard {
             om.put("price", o.pricePerUnit());
             om.put("amount", o.amount());
             om.put("filled", o.filledPct());
+            om.put("rate", macro.measuredSellRate(o.item()));   // measured units/hr (0 = unmeasured)
             orders.add(om);
         }
         m.put("orders", orders);
+
+        // The picker's ACTUAL objective per candidate (same code path as
+        // pickNextItem) — this is how ranking changes are verified in dry-run.
+        List<Map<String, Object>> rank = new ArrayList<>();
+        for (BazaarMacro.RankRow r : macro.ranking.stream().limit(12).toList()) {
+            Map<String, Object> rm = new HashMap<>();
+            rm.put("name", r.item());
+            rm.put("cph", r.cph());
+            rm.put("ppu", r.ppu());
+            rm.put("rate", r.sellRate());
+            rm.put("measured", r.measured());
+            rm.put("eff", r.eff());
+            rm.put("state", r.state());
+            rank.add(rm);
+        }
+        m.put("ranking", rank);
 
         List<Map<String, Object>> flips = new ArrayList<>();
         for (FlipCandidate c : macro.getApi().getCandidates().stream().limit(8).toList()) {
@@ -338,12 +355,18 @@ function load(){fetch('/api/stats').then(r=>r.json()).then(d=>{
  $('noOrd').style.display=d.orders.length?'none':'block';
  d.orders.forEach(o=>{const tr=document.createElement('tr');
   tr.innerHTML='<td><span class="side '+(o.side==='BUY'?'B':'S')+'">'+o.side+'</span></td>'+
-   '<td>'+o.item+'</td><td class="n num">'+fmt(o.price)+'</td><td class="n num">'+fmt(o.amount)+'</td>'+
+   '<td>'+o.item+(o.rate>0?' <span style="color:var(--faint);font-size:12px">✓'+fmt(o.rate)+'u/hr</span>':'')+'</td>'+
+   '<td class="n num">'+fmt(o.price)+'</td><td class="n num">'+fmt(o.amount)+'</td>'+
    '<td class="n num">'+o.filled.toFixed(0)+'%</td><td><div class="bar"><i style="width:'+Math.min(100,o.filled)+'%"></i></div></td>';
   tb.appendChild(tr);});
- $('flips').innerHTML=d.topFlips.map(f=>'<div class="flip"><span>'+f.name+'</span><span class="mut">'+
+ // Ranking = the picker's real objective (cph), with the leg rate feeding it.
+ // ✓ = rate is MEASURED from our own fills; ~ = volume-based estimate.
+ $('flips').innerHTML=((d.ranking&&d.ranking.length)?d.ranking.map(f=>
+  '<div class="flip"><span>'+f.name+(f.state!=='ok'?' <span class="mut">·'+f.state+'</span>':'')+'</span><span class="mut">'+
+  '<span class="g">'+fmt(f.cph)+'/hr</span> · '+(f.measured?'✓':'~')+fmt(f.rate)+'u/hr · eff '+f.eff.toFixed(2)+
+  '</span></div>').join(''):d.topFlips.map(f=>'<div class="flip"><span>'+f.name+'</span><span class="mut">'+
   '<span class="g">'+(f.margin*100).toFixed(1)+'%</span> · σ'+(f.sigma*100).toFixed(1)+' · '+
-  '<span class="'+(f.trend>=0?'g':'r')+'">'+(f.trend>=0?'▲':'▼')+(Math.abs(f.trend)*100).toFixed(1)+'</span></span></div>').join('')||'<div class="empty">Loading</div>';
+  '<span class="'+(f.trend>=0?'g':'r')+'">'+(f.trend>=0?'▲':'▼')+(Math.abs(f.trend)*100).toFixed(1)+'</span></span></div>').join(''))||'<div class="empty">Loading</div>';
  $('bench').innerHTML=d.benched.length?d.benched.join('<br>'):'None';
  const lg=$('log');const atBottom=lg.scrollTop+lg.clientHeight>=lg.scrollHeight-30;
  lg.textContent=d.log.join(String.fromCharCode(10));
