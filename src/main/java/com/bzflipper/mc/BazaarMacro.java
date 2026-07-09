@@ -491,7 +491,12 @@ public class BazaarMacro {
         StringBuilder f = new StringBuilder();
         f.append(String.format(Locale.ROOT, "BUY ORDERS TOTAL : %s coins%n", bCoins(buyTotal)));
         f.append(String.format(Locale.ROOT, "SELL OFFERS TOTAL : %s coins%n", bCoins(sellTotal)));
-        f.append(String.format(Locale.ROOT, "OVERALL TOTAL    : %s coins%n%n", bCoins(buyTotal + sellTotal)));
+        f.append(String.format(Locale.ROOT, "OVERALL TOTAL    : %s coins%n", bCoins(buyTotal + sellTotal)));
+        // Capital utilization — the metric that exposes idle coins.
+        f.append(String.format(Locale.ROOT, "FREE PURSE : %s  ·  DEPLOYED (buys) : %s  ·  UTILIZATION : %.0f%%%n",
+                bCoins(Double.isNaN(purse) ? 0 : purse), bCoins(deployedBuyCapital()), utilization() * 100));
+        f.append(String.format(Locale.ROOT, "OPEN SLOTS : %d / %d used%n%n",
+                lastOrders.size(), orderLimit));
 
         f.append("=== BUY ORDERS ===\n");
         buyAgg.entrySet().stream().sorted((x, y) -> Double.compare(y.getValue()[1], x.getValue()[1]))
@@ -1412,6 +1417,33 @@ public class BazaarMacro {
         return Math.min(even, cap);
     }
 
+    /** Coins currently escrowed in unfilled BUY orders — your money that IS working.
+     *  (Filled buys convert to inventory/sells; those show as projected profit.) */
+    public double deployedBuyCapital() {
+        double sum = 0;
+        for (ParsedOrder o : lastOrders) {
+            if (!o.buy() || Double.isNaN(o.pricePerUnit())) continue;
+            double unfilled = o.amount() * (1 - Math.min(100.0, o.filledPct()) / 100.0);
+            sum += unfilled * o.pricePerUnit();
+        }
+        return sum;
+    }
+
+    /** Fraction of your liquid coins actually deployed in buy orders (0..1). The
+     *  number that was invisible on the HUD while 100M sat idle. */
+    public double utilization() {
+        double deployed = deployedBuyCapital();
+        double free = Double.isNaN(purse) ? 0 : Math.max(0, purse - config.coinReserve);
+        double liquid = deployed + free;
+        return liquid <= 0 ? 0 : deployed / liquid;
+    }
+
+    /** True when a big share of liquid coins sits idle AND the book has room — the
+     *  cue to size orders up so the bankroll actually deploys. */
+    private boolean capitalIdle() {
+        return utilization() < (1 - config.idleDeployThreshold) && orders.size() < orderLimit;
+    }
+
     /** Minimum window between fill-rate samples. Sampling every pass (~250ms)
      *  poisoned the EMA: most passes see 0 new fills, so rate=0 was merged in
      *  4×/second, decaying every listed item's measured rate to ~0 within
@@ -1676,9 +1708,16 @@ public class BazaarMacro {
         double spendable = perOrderBudget();
         int byPurse = PriceMath.affordableUnits(spendable, ourBuyPrice, config.maxUnitsPerOrder);
         if (byPurse < 1) { log("insufficient purse for " + activeItem + " — skipping"); phase = Phase.PLAN; return; }
+        // Capital-aware order size: when a big chunk of your liquid coins is sitting
+        // IDLE and the book has open slots, let each order grow toward
+        // maxOrderVolumeFraction so the bankroll actually deploys — but it stays
+        // bounded by the item's own hourly volume, so it never dumps into a thin
+        // market (that would just sit unfilled, the opposite of the goal).
+        double volFrac = capitalIdle() ? Math.max(config.orderVolumeFraction, config.maxOrderVolumeFraction)
+                                       : config.orderVolumeFraction;
         int byVolume = (activeHourlyVol == Double.MAX_VALUE)
                 ? config.maxUnitsPerOrder
-                : (int) Math.max(1, activeHourlyVol * config.orderVolumeFraction);
+                : (int) Math.max(1, activeHourlyVol * volFrac);
 
         // Inventory-fit cap: essence bypasses inventory (unlimited); everything
         // else — INCLUDING shards, which land as real stacks — must fit in free

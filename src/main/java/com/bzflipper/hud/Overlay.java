@@ -72,8 +72,13 @@ public class Overlay {
         ly += LINE;
 
         double pending = macro.projectedProfit();
-        draw(ctx, mc, String.format(Locale.ROOT, "§ain offers %s%s§7  ·  proj %s/hr",
-                pending >= 0 ? "+" : "", coins(pending), coins(t.sessionPerHour(pending))),
+        double util = macro.utilization();
+        // deploy% = how much of your liquid coins is actually working in buy orders.
+        // Low % with a fat purse = idle capital (the thing that was capping profit).
+        String deployCol = util < 0.4 ? "§c" : util < 0.7 ? "§e" : "§a";
+        draw(ctx, mc, String.format(Locale.ROOT, "§ain offers %s%s§7 · %sdeploy %.0f%%§7 · proj %s/hr",
+                pending >= 0 ? "+" : "", coins(pending), deployCol, util * 100,
+                coins(t.sessionPerHour(pending))),
                 x + 2, ly, WHITE);
         ly += LINE;
 

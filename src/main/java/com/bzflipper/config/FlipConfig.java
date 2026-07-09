@@ -92,11 +92,25 @@ public class FlipConfig {
     public double orderVolumeFraction = 0.5;
 
     /**
+     * When capital is IDLE (lots of free purse and open book slots), each order may
+     * grow to this fraction of hourly volume instead of {@link #orderVolumeFraction}
+     * — so a big bankroll actually gets deployed instead of sitting in the purse.
+     * Still bounded by the item's own volume, so it never dumps into a thin market.
+     * Set equal to orderVolumeFraction to disable the idle boost.
+     */
+    public double maxOrderVolumeFraction = 1.0;
+
+    /** "Capital is idle" = free purse is at least this fraction of your liquid coins
+     *  (free + escrowed in buy orders) AND the book has open slots. Above it, orders
+     *  size up toward maxOrderVolumeFraction. */
+    public double idleDeployThreshold = 0.5;
+
+    /**
      * Skip items whose volume can't absorb at least this many coins per order —
      * an ABSOLUTE floor, so a bigger purse never reduces how many items qualify.
      * Filters out genuinely thin items without choking deployment. 0 = disable.
      */
-    public double minOrderValue = 500_000;
+    public double minOrderValue = 250_000;
 
     // ---- Auto flip sourcing (Hypixel Bazaar API) ----
     /** If true, pick the best flips live from the API instead of the fixed targets list. */
@@ -159,7 +173,7 @@ public class FlipConfig {
     public double maxExitLossFraction = 0.02;
 
     /** Minimum weekly volume (both sides) for liquidity — avoids dead items. */
-    public double apiMinWeeklyVolume = 500_000;
+    public double apiMinWeeklyVolume = 250_000;
 
     /** Skip API items whose unit buy price exceeds this (0 = no cap). Keeps orders affordable. */
     public double apiMaxUnitPrice = 0;
@@ -330,6 +344,7 @@ public class FlipConfig {
                     // deliberately — it just slowed the book from filling) to off.
                     if (cfg.orderCooldownTicks == 30) { cfg.orderCooldownTicks = 0; cfg.save(); }
                     cfg.migrateCookieFields();
+                    cfg.migrateDeployFilters();
                     return cfg;
                 }
             }
@@ -339,6 +354,21 @@ public class FlipConfig {
         FlipConfig cfg = new FlipConfig();
         cfg.save();
         return cfg;
+    }
+
+    /** Nudge the old conservative deployment floors down so a big idle purse gets
+     *  used (fixes the "half-empty book, 100M sitting free" symptom). Only fires on
+     *  the exact prior defaults — a value you deliberately set is left alone — and
+     *  logs so it's never a silent surprise. Edit the config to override. */
+    private void migrateDeployFilters() {
+        boolean changed = false;
+        if (minOrderValue == 500_000)     { minOrderValue = 250_000; changed = true; }
+        if (apiMinWeeklyVolume == 500_000) { apiMinWeeklyVolume = 250_000; changed = true; }
+        if (changed) {
+            System.out.println("[bzflipper] deploy tuning: lowered minOrderValue/apiMinWeeklyVolume "
+                    + "500k→250k so idle capital gets used (edit bzflipper.json to change)");
+            save();
+        }
     }
 
     /** Carry old cookie config (autoCookie / cookieRenewDays) forward onto the new
