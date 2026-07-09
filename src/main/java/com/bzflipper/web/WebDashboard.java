@@ -53,6 +53,7 @@ public class WebDashboard {
             server.createContext("/api/stats", ex -> respond(ex, 200, "application/json", statsJson()));
             server.createContext("/api/toggle", ex -> { macro.webToggle.set(true); respond(ex, 200, "application/json", "{\"ok\":true}"); });
             server.createContext("/api/panic",  ex -> { macro.webPanic.set(true);  respond(ex, 200, "application/json", "{\"ok\":true}"); });
+            server.createContext("/report", ex -> respond(ex, 200, "text/plain", macro.buildReport()));
             server.createContext("/api/dryrun", ex -> {
                 config.dryRun = !config.dryRun;
                 config.save();
@@ -254,6 +255,7 @@ tr:last-child td{border-bottom:0}
  <div class="tab act" data-p="stats">Overview</div>
  <div class="tab" data-p="orders">Orders</div>
  <div class="tab" data-p="chat">Activity</div>
+ <div class="tab" data-p="report">Report</div>
  <div class="tab" data-p="control">Control</div>
 </div>
 
@@ -280,6 +282,8 @@ tr:last-child td{border-bottom:0}
 
 <div class="page" id="p-chat"><div class="card"><div id="log"></div></div></div>
 
+<div class="page" id="p-report"><div class="card"><pre id="report" style="font-family:'SF Mono','JetBrains Mono',ui-monospace,Consolas,monospace;font-size:12px;line-height:1.7;color:#c8ccd4;padding:16px;overflow-x:auto;white-space:pre;max-height:640px;overflow-y:auto">Loading…</pre></div></div>
+
 <div class="page" id="p-control"><div class="grid">
  <div class="card pad">
   <button class="btn start" id="bToggle" onclick="post('toggle')">Start</button>
@@ -303,7 +307,9 @@ const $=id=>document.getElementById(id);
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('act'));
  document.querySelectorAll('.page').forEach(x=>x.classList.remove('act'));
- t.classList.add('act'); $('p-'+t.dataset.p).classList.add('act');});
+ t.classList.add('act'); $('p-'+t.dataset.p).classList.add('act');
+ if(t.dataset.p==='report')loadReport();});
+function loadReport(){fetch('/report').then(r=>r.text()).then(x=>{$('report').textContent=x;});}
 function fmt(n){if(n==null||isNaN(n))return '—';const a=Math.abs(n);
  if(a>=1e9)return (n/1e9).toFixed(2)+'B';if(a>=1e6)return (n/1e6).toFixed(2)+'M';
  if(a>=1e3)return (n/1e3).toFixed(1)+'k';return Math.round(n)+''}
@@ -381,6 +387,7 @@ function load(){fetch('/api/stats').then(r=>r.json()).then(d=>{
  HIST=d.history.map(h=>[h[0],h[1]]);draw();
 }).catch(()=>{$('stateTx').textContent='Disconnected';$('dot').classList.remove('on');});}
 load();setInterval(load,1500);
+setInterval(()=>{const rt=document.querySelector('.tab[data-p="report"]');if(rt&&rt.classList.contains('act'))loadReport();},4000);
 </script></body></html>
 """;
 }

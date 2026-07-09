@@ -183,6 +183,14 @@ public class BazaarMacro {
     private final Map<String, Double> efficiency = new HashMap<>();
     /** All-time realized profit per item (for the session report best/worst). */
     private final Map<String, Double> itemProfit = new HashMap<>();
+    // ---- Session breakdown (reset each start()) — powers the report's per-item
+    //      CLAIMED / SOLD / PROFIT / PPI table. Keyed by display name.
+    //      ConcurrentHashMap: the dashboard's /report endpoint reads these off the
+    //      HTTP thread while the game thread accumulates them. ----
+    private final Map<String, Integer> sessClaimedUnits = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, Double>  sessClaimedCost  = new java.util.concurrent.ConcurrentHashMap<>();  // units × buy price
+    private final Map<String, Integer> sessSoldUnits    = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, Double>  sessSoldRevenue  = new java.util.concurrent.ConcurrentHashMap<>();  // units × net sell price
     /** Empirical sell fill-rate (units/hr EMA) per item — the measured throughput.
      *  ConcurrentHashMap: read by the dashboard (rank/order rows) off the game thread. */
     private final Map<String, Double> fillRate = new java.util.concurrent.ConcurrentHashMap<>();
@@ -414,6 +422,9 @@ public class BazaarMacro {
         // Clear any prior cookie refresh/hard-stop so a manual restart re-arms the guard.
         cookieError = null; cookieRefreshActive = false; cookieStage = 0;
         cookieRetries = 0; cookieSlotSelected = false; cookieHotbarSlot = -1; cookiePrevSelected = -1;
+        // Fresh session breakdown.
+        sessClaimedUnits.clear(); sessClaimedCost.clear();
+        sessSoldUnits.clear();    sessSoldRevenue.clear();
         lastManageRefresh = System.currentTimeMillis();   // grid is fresh at start — no bounce
         resetDelay();
 
@@ -447,48 +458,105 @@ public class BazaarMacro {
         if (why.contains("toggled") || why.contains("panic")) reportSession();
     }
 
-    /** Write a session summary to chat + config/bzflipper-report.txt. */
-    private void reportSession() {
+    /** Compact coin formatter for the report: B/M/K with 2 decimals. */
+    private static String bCoins(double v) {
+        double a = Math.abs(v);
+        if (a >= 1e9) return String.format(Locale.ROOT, "%.2fB", v / 1e9);
+        if (a >= 1e6) return String.format(Locale.ROOT, "%.2fM", v / 1e6);
+        if (a >= 1e3) return String.format(Locale.ROOT, "%.2fK", v / 1e3);
+        return String.format(Locale.ROOT, "%.2f", v);
+    }
+
+    private record ProfitRow(String item, int claimedUnits, double claimedCost,
+                             int soldUnits, double soldRevenue, double profit) {}
+
+    /** The full session breakdown: open buy/sell exposure (from the live grid,
+     *  aggregated per item) + a per-item CLAIMED / SOLD / PROFIT / PPI table.
+     *  Public so it can also be dumped on demand. */
+    public String buildReport() {
         long secs = tracker.elapsedSeconds();
-        var top = itemProfit.entrySet().stream()
-                .sorted((a, b) -> Double.compare(b.getValue(), a.getValue())).toList();
+
+        // Open exposure, aggregated by item: value = units × price/unit.
+        Map<String, double[]> buyAgg = new HashMap<>();    // item -> {units, coins}
+        Map<String, double[]> sellAgg = new HashMap<>();
+        for (ParsedOrder o : lastOrders) {
+            double units = o.amount();
+            double val = Double.isNaN(o.pricePerUnit()) ? 0 : units * o.pricePerUnit();
+            double[] a = (o.buy() ? buyAgg : sellAgg).computeIfAbsent(o.item(), k -> new double[2]);
+            a[0] += units; a[1] += val;
+        }
+        double buyTotal = buyAgg.values().stream().mapToDouble(a -> a[1]).sum();
+        double sellTotal = sellAgg.values().stream().mapToDouble(a -> a[1]).sum();
 
         StringBuilder f = new StringBuilder();
-        f.append("=== bzflipper session report ===\n");
-        f.append(String.format(Locale.ROOT, "uptime           %dh %dm%n", secs / 3600, (secs % 3600) / 60));
-        f.append(String.format(Locale.ROOT, "session profit   %,.0f  (%,.0f/hr, %,.0f/hr recent)%n",
-                tracker.total(), tracker.sessionPerHour(), tracker.recentPerHour()));
-        f.append(String.format(Locale.ROOT, "all-time profit  %,.0f%n", allTimeProfit));
-        f.append(String.format(Locale.ROOT, "open-offer value +%,.0f (unrealized)%n", projectedProfit()));
-        f.append(String.format(Locale.ROOT, "flips %d   fills %dB/%dS   orders placed %d%n",
-                flipsCompleted, buysFilled, sellsFilled, ordersPlaced));
-        f.append(String.format(Locale.ROOT, "cookie buff      %s%n", cookieStatus));
-        f.append("\n-- best items --\n");
-        for (int i = 0; i < Math.min(6, top.size()); i++) {
-            f.append(String.format(Locale.ROOT, "  %+,.0f  %s%n", top.get(i).getValue(), top.get(i).getKey()));
-        }
-        boolean anyLoss = !top.isEmpty() && top.get(top.size() - 1).getValue() < 0;
-        if (anyLoss) {
-            f.append("-- worst items --\n");
-            for (int i = top.size() - 1; i >= 0 && top.get(i).getValue() < 0; i--) {
-                f.append(String.format(Locale.ROOT, "  %+,.0f  %s%n", top.get(i).getValue(), top.get(i).getKey()));
-            }
-        }
+        f.append(String.format(Locale.ROOT, "BUY ORDERS TOTAL : %s coins%n", bCoins(buyTotal)));
+        f.append(String.format(Locale.ROOT, "SELL OFFERS TOTAL : %s coins%n", bCoins(sellTotal)));
+        f.append(String.format(Locale.ROOT, "OVERALL TOTAL    : %s coins%n%n", bCoins(buyTotal + sellTotal)));
 
+        f.append("=== BUY ORDERS ===\n");
+        buyAgg.entrySet().stream().sorted((x, y) -> Double.compare(y.getValue()[1], x.getValue()[1]))
+                .forEach(e -> f.append(String.format(Locale.ROOT, "🟢 %s — %d× (%s)%n",
+                        e.getKey().toUpperCase(Locale.ROOT), (long) e.getValue()[0], bCoins(e.getValue()[1]))));
+
+        f.append("\n=== SELL OFFERS ===\n");
+        sellAgg.entrySet().stream().sorted((x, y) -> Double.compare(y.getValue()[1], x.getValue()[1]))
+                .forEach(e -> f.append(String.format(Locale.ROOT, "🔴 %s — %d× (%s)%n",
+                        e.getKey().toUpperCase(Locale.ROOT), (long) e.getValue()[0], bCoins(e.getValue()[1]))));
+
+        // Per-item profit table: profit = net sold revenue − buy cost (cashflow),
+        // so leftovers sold with no session buy still show as gain (matches how the
+        // per-item lines are meant to add up). PPI = profit ÷ units sold.
+        java.util.Set<String> items = new java.util.HashSet<>();
+        items.addAll(sessClaimedUnits.keySet());
+        items.addAll(sessSoldUnits.keySet());
+        List<ProfitRow> rows = new java.util.ArrayList<>();
+        double totalProfit = 0;
+        for (String it : items) {
+            int cu = sessClaimedUnits.getOrDefault(it, 0);
+            double cc = sessClaimedCost.getOrDefault(it, 0.0);
+            int su = sessSoldUnits.getOrDefault(it, 0);
+            double sr = sessSoldRevenue.getOrDefault(it, 0.0);
+            double p = sr - cc;
+            totalProfit += p;
+            rows.add(new ProfitRow(it, cu, cc, su, sr, p));
+        }
+        rows.sort((a, b) -> Double.compare(b.profit(), a.profit()));
+
+        f.append(String.format(Locale.ROOT, "%n=== PROFIT ===%n"));
+        f.append(String.format(Locale.ROOT, "TOTAL PROFIT : %s coins%n", bCoins(totalProfit)));
+        f.append(String.format(Locale.ROOT, "REALIZED (matched) : %s  ·  %s/hr%n",
+                bCoins(tracker.total()), bCoins(tracker.sessionPerHour())));
+        f.append(String.format(Locale.ROOT, "SESSION DURATION : %d hours %d minutes%n%n",
+                secs / 3600, (secs % 3600) / 60));
+        for (ProfitRow r : rows) {
+            double ppi = r.soldUnits() > 0 ? r.profit() / r.soldUnits() : 0;
+            f.append(String.format(Locale.ROOT,
+                    "💰 %s — CLAIMED: %d× (%s) | SOLD: %d× (%s) | PROFIT: %s | PPI: %s%n",
+                    r.item().toUpperCase(Locale.ROOT), r.claimedUnits(), bCoins(r.claimedCost()),
+                    r.soldUnits(), bCoins(r.soldRevenue()), bCoins(r.profit()), bCoins(ppi)));
+        }
+        return f.toString();
+    }
+
+    /** Write the breakdown to config/bzflipper-report.txt + a concise chat summary. */
+    private void reportSession() {
+        String report = buildReport();
         try {
             java.nio.file.Files.writeString(net.fabricmc.loader.api.FabricLoader.getInstance()
-                    .getConfigDir().resolve("bzflipper-report.txt"), f.toString());
+                    .getConfigDir().resolve("bzflipper-report.txt"), report);
         } catch (Exception ignored) {
         }
 
+        long secs = tracker.elapsedSeconds();
+        var top = itemProfit.entrySet().stream()
+                .max((a, b) -> Double.compare(a.getValue(), b.getValue()));
         log("§b── session report ──");
-        log(String.format(Locale.ROOT, "uptime %dh%dm · profit §a%,.0f§r (%,.0f/hr) · all-time §a%,.0f",
-                secs / 3600, (secs % 3600) / 60, tracker.total(), tracker.sessionPerHour(), allTimeProfit));
-        log(String.format(Locale.ROOT, "flips %d · %,.0f in open offers · full report → config/bzflipper-report.txt",
-                flipsCompleted, projectedProfit()));
-        if (!top.isEmpty()) {
-            log(String.format(Locale.ROOT, "best: §a%+,.0f§r %s", top.get(0).getValue(), top.get(0).getKey()));
-        }
+        log(String.format(Locale.ROOT, "uptime %dh%dm · profit §a%s§r (%s/hr) · %,.0f in open offers",
+                secs / 3600, (secs % 3600) / 60, bCoins(tracker.total()),
+                bCoins(tracker.sessionPerHour()), projectedProfit()));
+        top.ifPresent(e -> log(String.format(Locale.ROOT, "best: §a%s§r %s",
+                bCoins(e.getValue()), e.getKey())));
+        log("full breakdown → config/bzflipper-report.txt");
     }
 
     // ---- main loop ----
@@ -1179,6 +1247,11 @@ public class BazaarMacro {
         oi.claimedSoFar = Math.min(Math.max(o.amount(), 1), oi.claimedSoFar + newUnits);
 
         buysFilled++;
+        // Session breakdown: claimed units + what they cost us to buy.
+        if (newUnits > 0 && !Double.isNaN(oi.buyPrice)) {
+            sessClaimedUnits.merge(o.item(), newUnits, Integer::sum);
+            sessClaimedCost.merge(o.item(), newUnits * oi.buyPrice, Double::sum);
+        }
         boolean addedPending = !queuedForSell(o.item());
         if (addedPending) pendingSells.addLast(o.item());
         pendingSellAmounts.merge(o.key(), newUnits, Integer::sum);
@@ -1235,6 +1308,13 @@ public class BazaarMacro {
         // refresh with a readable % books it correctly; if the order actually
         // completed, prune clears it. Conservative: undercount beats phantom profit.
         if (oi != null) oi.soldSoFar = prevSold + newSold;
+
+        // Session breakdown: sold units + net revenue (independent of whether we
+        // know the buy cost — e.g. leftovers from a prior session still count).
+        if (newSold > 0 && !Double.isNaN(sellP)) {
+            sessSoldUnits.merge(o.item(), newSold, Integer::sum);
+            sessSoldRevenue.merge(o.item(), sellP * (1.0 - config.taxFraction) * newSold, Double::sum);
+        }
 
         sellsFilled++;
         if (!Double.isNaN(buyP) && !Double.isNaN(sellP) && newSold > 0) {
