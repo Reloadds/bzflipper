@@ -183,6 +183,12 @@ public class BazaarMacro {
     private final Map<String, Double> efficiency = new HashMap<>();
     /** All-time realized profit per item (for the session report best/worst). */
     private final Map<String, Double> itemProfit = new HashMap<>();
+    // ---- Auto-meta learner (persisted): lifetime flip count + a durable, self-
+    //      updating avoid-list keyed by item. The bot's accumulated "meta". ----
+    private final Map<String, Integer> itemFlips = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Item key → timestamp until which it's avoided (probation-refreshed). Read by
+     *  the dashboard off-thread, so ConcurrentHashMap. */
+    private final Map<String, Long> metaAvoidUntil = new java.util.concurrent.ConcurrentHashMap<>();
     // ---- Session breakdown (reset each start()) — powers the report's per-item
     //      CLAIMED / SOLD / PROFIT / PPI table. Keyed by display name.
     //      ConcurrentHashMap: the dashboard's /report endpoint reads these off the
@@ -311,6 +317,8 @@ public class BazaarMacro {
         Set<String> boughtItems = new HashSet<>();
         Map<String, Double> efficiency = new HashMap<>();
         Map<String, Double> itemProfit = new HashMap<>();
+        Map<String, Integer> itemFlips = new HashMap<>();
+        Map<String, Long> metaAvoidUntil = new HashMap<>();
         Map<String, Double> fillRate = new HashMap<>();
         Map<String, Double> buyFillRate = new HashMap<>();
         double allTimeProfit = 0;
@@ -338,6 +346,8 @@ public class BazaarMacro {
             if (s.pendingSellAmounts != null) pendingSellAmounts.putAll(s.pendingSellAmounts);
             if (s.blacklistUntil != null) blacklistUntil.putAll(s.blacklistUntil);
             if (s.boughtItems != null) boughtItems.addAll(s.boughtItems);
+            if (s.itemFlips != null) itemFlips.putAll(s.itemFlips);
+            if (s.metaAvoidUntil != null) metaAvoidUntil.putAll(s.metaAvoidUntil);
             if (s.efficiency != null) efficiency.putAll(s.efficiency);
             if (s.itemProfit != null) itemProfit.putAll(s.itemProfit);
             // Drop poisoned rates from the old per-pass sampling bug (rates decayed
@@ -373,6 +383,8 @@ public class BazaarMacro {
             s.pendingSellAmounts.putAll(pendingSellAmounts);
             s.blacklistUntil.putAll(blacklistUntil);
             s.boughtItems.addAll(boughtItems);
+            s.itemFlips.putAll(itemFlips);
+            s.metaAvoidUntil.putAll(metaAvoidUntil);
             s.efficiency.putAll(efficiency);
             s.itemProfit.putAll(itemProfit);
             s.fillRate.putAll(fillRate);
@@ -382,12 +394,49 @@ public class BazaarMacro {
             s.allTimeProfit = allTimeProfit;
             s.liquiditySamples.addAll(liquiditySamples);
             java.nio.file.Files.writeString(statePath(), GSON.toJson(s));
+            writeMetaConfig();
             stateDirty = false;
             lastStateSave = System.currentTimeMillis();
         } catch (Exception e) {
             lastStateSave = System.currentTimeMillis();   // throttle retries even if it failed
             System.err.println("[bzflipper] state save failed: " + e.getMessage());
         }
+    }
+
+    /** One row of the learned meta, most-profitable first. */
+    private record MetaRow(String item, int flips, double totalProfit, double avgProfit,
+                           double efficiency, boolean avoided) {}
+
+    /** Export the accumulated meta to config/bzflipper-meta.json — a human-readable,
+     *  ever-growing record of which items earn and which are avoided. This is the
+     *  "meta config forever": it persists and sharpens every session. */
+    private void writeMetaConfig() {
+        long now = System.currentTimeMillis();
+        java.util.List<MetaRow> rows = new java.util.ArrayList<>();
+        for (var e : itemProfit.entrySet()) {
+            String k = e.getKey();
+            int flips = itemFlips.getOrDefault(k, 0);
+            double avg = flips > 0 ? e.getValue() / flips : 0;
+            rows.add(new MetaRow(k, flips, e.getValue(), avg,
+                    efficiency.getOrDefault(k, 1.0), metaAvoidUntil.getOrDefault(k, 0L) > now));
+        }
+        rows.sort((a, b) -> Double.compare(b.totalProfit(), a.totalProfit()));
+        java.util.Map<String, Object> meta = new java.util.LinkedHashMap<>();
+        meta.put("updated", now);
+        meta.put("itemsTracked", rows.size());
+        meta.put("avoided", rows.stream().filter(MetaRow::avoided).map(MetaRow::item).toList());
+        meta.put("items", rows);
+        try {
+            java.nio.file.Files.writeString(net.fabricmc.loader.api.FabricLoader.getInstance()
+                    .getConfigDir().resolve("bzflipper-meta.json"), GSON.toJson(meta));
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Number of items currently on the learned avoid-list (for HUD/dashboard). */
+    public int metaAvoidedCount() {
+        long now = System.currentTimeMillis();
+        return (int) metaAvoidUntil.values().stream().filter(v -> v > now).count();
     }
 
     /** Measured sell fill-rate (units/hr EMA) for an item, or 0 if never measured.
@@ -495,8 +544,8 @@ public class BazaarMacro {
         // Capital utilization — the metric that exposes idle coins.
         f.append(String.format(Locale.ROOT, "FREE PURSE : %s  ·  DEPLOYED (buys) : %s  ·  UTILIZATION : %.0f%%%n",
                 bCoins(Double.isNaN(purse) ? 0 : purse), bCoins(deployedBuyCapital()), utilization() * 100));
-        f.append(String.format(Locale.ROOT, "OPEN SLOTS : %d / %d used%n%n",
-                lastOrders.size(), orderLimit));
+        f.append(String.format(Locale.ROOT, "OPEN SLOTS : %d / %d used  ·  META-AVOIDED : %d items (learned)%n%n",
+                lastOrders.size(), orderLimit, metaAvoidedCount()));
 
         f.append("=== BUY ORDERS ===\n");
         buyAgg.entrySet().stream().sorted((x, y) -> Double.compare(y.getValue()[1], x.getValue()[1]))
@@ -1341,6 +1390,10 @@ public class BazaarMacro {
                 note("§elost coins on " + o.item() + " — benched "
                         + config.badItemBlacklistMinutes + "m");
             }
+            // Auto-meta: one completed flip's worth of evidence — update the item's
+            // lifetime record and re-judge whether it belongs on the durable avoid-list.
+            itemFlips.merge(o.key(), 1, Integer::sum);
+            evaluateMeta(o.key(), o.item());
             log(String.format(Locale.ROOT, "§asold§r %d× %s  %+,.0f coins  (session %,.0f)",
                     newSold, o.item(), profit, tracker.total()));
         } else if (newSold > 0) {
@@ -1362,6 +1415,40 @@ public class BazaarMacro {
                 }
             }
         }
+    }
+
+    /** Auto-meta learner: judge an item on its LIFETIME realized record and either
+     *  add it to the durable avoid-list or clear it. Runs after each completed
+     *  flip. Probation-based (not permanent) so a recovering item gets re-tested —
+     *  the meta keeps improving instead of freezing. */
+    private void evaluateMeta(String key, String item) {
+        if (!config.autoBlacklist) return;
+        int flips = itemFlips.getOrDefault(key, 0);
+        if (flips < config.autoBlacklistMinFlips) return;   // not enough evidence yet
+        double total = itemProfit.getOrDefault(key, 0.0);
+        double avg = total / flips;
+        double eff = efficiency.getOrDefault(key, 1.0);
+        boolean bad = avg < config.autoBlacklistMinAvgProfit || eff < config.minEfficiency;
+        long now = System.currentTimeMillis();
+        if (bad) {
+            boolean wasClear = metaAvoidUntil.getOrDefault(key, 0L) <= now;
+            metaAvoidUntil.put(key, now + (long) (config.autoBlacklistProbationHours * 3_600_000L));
+            stateDirty = true;
+            if (wasClear) {
+                note(String.format(Locale.ROOT,
+                        "§cmeta: avoiding %s§r — avg %+,.0f/flip over %d flips (eff %.2f)",
+                        item, avg, flips, eff));
+            }
+        } else if (metaAvoidUntil.remove(key) != null) {
+            stateDirty = true;
+            note(String.format(Locale.ROOT,
+                    "§ameta: cleared %s§r — now avg %+,.0f/flip over %d flips", item, avg, flips));
+        }
+    }
+
+    /** True if an item is on the learned avoid-list right now (probation not elapsed). */
+    private boolean metaAvoided(String key) {
+        return config.autoBlacklist && metaAvoidUntil.getOrDefault(key, 0L) > System.currentTimeMillis();
     }
 
     /** Why no new order is being opened right now — a precise breakdown so the
@@ -1537,6 +1624,7 @@ public class BazaarMacro {
             String state = "ok";
             if (orders.containsKey(k) || lastOrders.stream().anyMatch(o -> o.key().equals(k))
                     || pendingSells.stream().anyMatch(p -> key(p).equals(k))) state = "held";
+            else if (metaAvoided(k)) state = "meta-avoid";
             else if (blacklistUntil.getOrDefault(k, 0L) > now) state = "benched";
             else if (efficiency.getOrDefault(k, 1.0) < config.minEfficiency) state = "low-eff";
             else if (c.ourBuyPrice() > perOrderBudget()) state = "too pricey";
@@ -1570,7 +1658,8 @@ public class BazaarMacro {
             for (FlipCandidate c : api.getCandidates()) {
                 String key = key(c.displayName);
                 if (held.contains(key)) continue;
-                if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // benched item
+                if (blacklistUntil.getOrDefault(key, 0L) > now) continue; // short bench
+                if (metaAvoided(key)) continue;                            // learned avoid-list
                 // Chronically-bad item (captures too little of its quoted margin):
                 // bench it TEMPORARILY with probation, not forever — markets change.
                 if (efficiency.getOrDefault(key, 1.0) < config.minEfficiency) {

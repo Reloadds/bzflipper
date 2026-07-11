@@ -109,6 +109,7 @@ public class WebDashboard {
         m.put("capture", macro.captureEstimate());   // learned account share (or config guess)
         m.put("deployed", macro.deployedBuyCapital());
         m.put("utilization", macro.utilization());
+        m.put("metaAvoided", macro.metaAvoidedCount());   // learned avoid-list size
         m.put("flips", macro.flipsCompleted);
         m.put("buysFilled", macro.buysFilled);
         m.put("sellsFilled", macro.sellsFilled);

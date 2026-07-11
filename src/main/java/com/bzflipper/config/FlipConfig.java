@@ -217,6 +217,27 @@ public class FlipConfig {
      *  margin — temporarily blacklisted, then given a fresh chance. */
     public int badItemBlacklistMinutes = 45;
 
+    // ---- Auto-meta learner (self-improving blacklist) ----
+    // Watches its OWN realized results per item and permanently learns which items
+    // to avoid — a "meta" that keeps getting better the longer it runs. Persisted
+    // in bzflipper-state.json and exported to config/bzflipper-meta.json.
+
+    /** Learn a durable per-item avoid-list from realized profit/efficiency. */
+    public boolean autoBlacklist = true;
+
+    /** Need at least this many completed flips of an item before judging it — one
+     *  or two unlucky flips shouldn't condemn an item forever. */
+    public int autoBlacklistMinFlips = 8;
+
+    /** Avoid an item whose AVERAGE realized profit per flip falls below this (0 =
+     *  avoid net-negative items; raise to demand a positive average). */
+    public double autoBlacklistMinAvgProfit = 0;
+
+    /** Re-test an avoided item this often (markets change) — it flips a few times,
+     *  then gets re-judged and re-avoided if still bad. Keeps the meta from locking
+     *  in a verdict forever. */
+    public double autoBlacklistProbationHours = 12;
+
     // ---- Booster Cookie refresh guard ----
     // The Bazaar is only reachable via /bz while the Cookie Buff is active, and
     // the buff counts down even while offline — so the macro reads the remaining
