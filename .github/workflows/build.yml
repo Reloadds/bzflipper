@@ -21,11 +21,14 @@ jobs:
           # Full history so the "commit jars to dist/" step can rebase before pushing.
           fetch-depth: 0
 
-      - name: Set up JDK 21
+      # JDK 25 for the BUILD toolchain — the newest Fabric Loom (resolved fresh
+      # each run) now requires JVM 25 to run. The mod still targets Java 21 bytecode
+      # (build.gradle: release = 21) for the Minecraft 1.21.11 runtime.
+      - name: Set up JDK 25
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
 
       - name: Resolve real Fabric versions for the target Minecraft
         run: |
