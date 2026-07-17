@@ -44,6 +44,13 @@ public class BazaarApi {
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10)).build();
 
+    /** Runtime-adaptive minimum margin gate (the auto-margin controller sets this).
+     *  volatile: written on the game thread, read here on the API thread. -1 = use
+     *  the configured apiMinMargin. Kept OFF the config object so it never persists. */
+    private volatile double dynMinMargin = -1;
+    public void setDynMinMargin(double m) { dynMinMargin = m; }
+    public double effectiveMinMargin() { return dynMinMargin > 0 ? dynMinMargin : config.apiMinMargin; }
+
     private volatile List<FlipCandidate> candidates = List.of();
     /** Live top-of-book for EVERY bazaar item, keyed by lowercase display name. */
     private volatile Map<String, FlipCandidate> quotes = Map.of();
@@ -146,9 +153,11 @@ public class BazaarApi {
             // on orders we hold), regardless of the flip filters below.
             quoteMap.put(Keys.norm(c.displayName), c);
 
+            double minMargin = effectiveMinMargin();   // adaptive gate (auto-margin) or config floor
             double margin = PriceMath.netMarginFraction(topBuyOrder, lowestSellOffer, config.taxFraction);
             // Volatility-adjusted floor: riskier items must clear a fatter cushion.
-            if (margin < c.requiredMargin(config) || margin > config.apiMaxMargin) continue;
+            double requiredMargin = minMargin + config.volatilityLambda * volatility;
+            if (margin < requiredMargin || margin > config.apiMaxMargin) continue;
             if (Math.min(buyMW, sellMW) < config.apiMinWeeklyVolume) continue;
             // Momentum: don't buy into a crash (protects the sell side).
             if (trend < -config.crashFilter) continue;
@@ -173,7 +182,7 @@ public class BazaarApi {
             double avgBuyOrder  = q.has("sellPrice") ? q.get("sellPrice").getAsDouble() : 0;
             if (avgSellOffer > 0 && avgBuyOrder > 0) {
                 double weightedMargin = PriceMath.netMarginFraction(avgBuyOrder, avgSellOffer, config.taxFraction);
-                if (weightedMargin < config.apiMinMargin * 0.4) continue;
+                if (weightedMargin < minMargin * 0.4) continue;
             }
 
             list.add(c);

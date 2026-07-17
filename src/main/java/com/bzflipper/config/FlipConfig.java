@@ -119,8 +119,23 @@ public class FlipConfig {
     /** Seconds between API refreshes (min 10). Faster = quicker undercut reaction. */
     public int apiRefreshSeconds = 20;
 
-    /** Minimum net margin (after tax) for an API-sourced flip. */
+    /** Minimum net margin (after tax) for an API-sourced flip. When autoMargin is
+     *  on, this is the FLOOR — the controller only raises above it, never below. */
     public double apiMinMargin = 0.03;
+
+    // ---- Adaptive margin controller (optimize coins/hour) ----
+    // Raises the margin gate when good flips outnumber your open slots (skim the
+    // best → more coins per scarce slot) and lowers it back toward the floor when
+    // you have idle capital / empty slots (deploy more). Re-evaluated each period.
+
+    /** Enable the runtime coins/hour margin controller. */
+    public boolean autoMargin = true;
+
+    /** Most the controller may add ABOVE apiMinMargin (e.g. 0.08 → up to floor+8%). */
+    public double autoMarginMaxBonus = 0.08;
+
+    /** How often to re-evaluate the gate (seconds). */
+    public int autoMarginPeriodSeconds = 300;
 
     /** Maximum net margin — anything above is almost always an illiquid/manipulation trap. */
     public double apiMaxMargin = 0.30;

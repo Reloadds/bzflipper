@@ -110,6 +110,7 @@ public class WebDashboard {
         m.put("deployed", macro.deployedBuyCapital());
         m.put("utilization", macro.utilization());
         m.put("metaAvoided", macro.metaAvoidedCount());   // learned avoid-list size
+        m.put("minMargin", macro.getApi().effectiveMinMargin());   // live adaptive margin gate
         m.put("flips", macro.flipsCompleted);
         m.put("buysFilled", macro.buysFilled);
         m.put("sellsFilled", macro.sellsFilled);

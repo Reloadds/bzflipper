@@ -101,6 +101,10 @@ public class BazaarMacro {
     /** Non-null = hard-stopped on a cookie failure; shown on the HUD. */
     public volatile String cookieError = null;
 
+    // Adaptive margin controller.
+    private double baseMinMargin;              // the configured floor, captured at start
+    private long lastMarginAdjust = 0;
+
     /** Canonical item key (shared with OrderParser/BazaarApi). */
     private static String key(String s) { return Keys.norm(s); }
 
@@ -467,6 +471,9 @@ public class BazaarMacro {
         serverClosing = false;
         inventoryFull = false;
         stashPending = false;
+        baseMinMargin = config.apiMinMargin;   // floor for the adaptive controller
+        lastMarginAdjust = System.currentTimeMillis();
+        api.setDynMinMargin(baseMinMargin);
         nextCookieCheck = System.currentTimeMillis() + 30_000L;   // check shortly after start
         // Clear any prior cookie refresh/hard-stop so a manual restart re-arms the guard.
         cookieError = null; cookieRefreshActive = false; cookieStage = 0;
@@ -643,6 +650,7 @@ public class BazaarMacro {
 
         purse = PurseReader.readPurse(mc);
         updateTopCandidate();
+        adaptMargin();   // coins/hr controller: tune the margin gate to capacity
         // Cheap, GUI-free buff-timer read every tick — the "top of each flip cycle"
         // read the refresh guard is built on. Runs on the client thread; never
         // couples to the background API fetch thread (#7).
@@ -1529,6 +1537,50 @@ public class BazaarMacro {
      *  cue to size orders up so the bankroll actually deploys. */
     private boolean capitalIdle() {
         return utilization() < (1 - config.idleDeployThreshold) && orders.size() < orderLimit;
+    }
+
+    /**
+     * Adaptive margin controller — tunes the minimum-margin GATE to maximize
+     * realized coins/hour. The gate is not the ranker (that already sorts by cph);
+     * it sets the candidate POOL. The economics:
+     *   • Slots/capital binding (book full, more good flips than slots) → RAISE the
+     *     gate so each scarce slot lands a fatter flip. Higher coins/hr.
+     *   • Idle capital / empty slots → LOWER toward the floor so the bankroll
+     *     actually deploys (raising it here would under-deploy = lose money).
+     * Only ever moves ABOVE the configured apiMinMargin (never trades below your
+     * floor), by at most autoMarginMaxBonus, one small step per period. The value
+     * lives on BazaarApi, never on the config, so it never persists.
+     */
+    private void adaptMargin() {
+        if (!config.autoMargin) return;
+        long now = System.currentTimeMillis();
+        if (now - lastMarginAdjust < config.autoMarginPeriodSeconds * 1000L) return;
+        lastMarginAdjust = now;
+
+        int freeSlots = Math.max(0, orderLimit - orders.size());
+        // Fresh, buyable flips right now (the ranking snapshot already applied the
+        // gate + held/benched/meta filters; "ok" = we could place it).
+        long qualifiers = ranking.stream().filter(r -> "ok".equals(r.state())).count();
+
+        double cur = api.effectiveMinMargin();
+        double lo = baseMinMargin, hi = baseMinMargin + Math.max(0, config.autoMarginMaxBonus);
+        double step = 0.005;   // 0.5% per period — gentle
+        double next = cur;
+
+        if (freeSlots <= 1 && qualifiers > 2L * Math.max(1, freeSlots) + 2) {
+            next = Math.min(hi, cur + step);          // capacity-bound + surplus → be pickier
+        } else if (freeSlots >= 2 && qualifiers < freeSlots) {
+            next = Math.max(lo, cur - step);          // empty slots + starving → admit more
+        } else if (cur > lo) {
+            next = Math.max(lo, cur - step / 2);      // neutral → drift back toward the floor
+        }
+
+        if (Math.abs(next - cur) > 1e-6) {
+            api.setDynMinMargin(next);
+            note(String.format(Locale.ROOT,
+                    "§bauto-margin %.1f%%→%.1f%%§7 (%d flips ready, %d free slots)",
+                    cur * 100, next * 100, qualifiers, freeSlots));
+        }
     }
 
     /** Minimum window between fill-rate samples. Sampling every pass (~250ms)
